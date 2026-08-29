@@ -32,6 +32,15 @@ RINGKASAN STRATEGI
      SL = wick - jarak yang sama.
    - Kalau ada cross SEARAH baru sebelum limit lama sempat fill, limit lama
      diganti ke wick yang terbaru.
+   - GATE RSI TUNGGAL (RSI4, logika DIBALIK dari RSI konvensional): golden cross
+     (Long) valid HANYA jika RSI4 <= RSI_GATE_MAX_LONG (default 70) -- tolak kalau
+     sudah overbought. Death cross (Short) valid HANYA jika RSI4 >= RSI_GATE_MIN_SHORT
+     (default 40) -- tolak kalau sudah oversold. Dicek TEPAT di candle penyebab cross,
+     kondisi STRUKTURAL, bukan filter statistik. Bisa dimatikan via env var.
+   - FILTER JARAK SL: sinyal cuma dieksekusi kalau jarak SL dari entry (persen)
+     >= FILTER_MIN_DIST_PCT (default 0.615%) -- hasil riset backtest 45 coin ~1
+     tahun H1 menunjukkan sinyal dgn SL terlalu mepet punya win-rate lebih rendah.
+     Bisa dimatikan (isi 0) via env var.
 
 4. FLIP PROTECTION:
    - Kalau sedang PENDING (limit belum fill) atau ACTIVE (posisi terbuka) untuk
@@ -324,6 +333,25 @@ ORDER_BUMP_FLOOR = 4.0
 MAX_CONCURRENT   = int(os.environ.get('MAX_CONCURRENT', 10))
 MIN_DIST_PCT     = 0.002    # floor keamanan SL minimum 0.2% dari entry
 
+# GATE RSI TUNGGAL saat EMA cross (BUKAN filter statistik -- kondisi STRUKTURAL yg dicek
+# TEPAT di candle penyebab cross, sama level dgn syarat cross itu sendiri). Hasil riset
+# backtest 45 coin ~1 tahun H1: RSI4 (periode pendek, reaktif thd harga), logika DIBALIK
+# dari RSI konvensional (overbought=jangan-beli/oversold=jangan-jual) -- di sini overbought
+# JUSTRU jadi batas atas utk Long, oversold jadi batas bawah utk Short. Cocok utk strategi
+# momentum/breakout spt ini, bukan mean-reversion. Bisa dimatikan via Railway Variables.
+RSI_GATE_PERIOD    = int(os.environ.get('RSI_GATE_PERIOD', 4))
+RSI_GATE_ENABLED   = os.environ.get('RSI_GATE_ENABLED', 'true').lower() == 'true'
+RSI_GATE_MAX_LONG  = float(os.environ.get('RSI_GATE_MAX_LONG', 70))   # Long butuh RSI4 <= ini
+RSI_GATE_MIN_SHORT = float(os.environ.get('RSI_GATE_MIN_SHORT', 40))  # Short butuh RSI4 >= ini
+
+# FILTER Jarak SL dari entry (persen) saat cross. Hasil riset backtest: sinyal dgn jarak
+# SL >= ambang tertentu punya win-rate jauh lebih tinggi drpd sinyal dgn SL terlalu mepet.
+# TERPISAH dari MIN_DIST_PCT (yg cuma safety floor memperlebar SL, bukan menolak sinyal) --
+# filter ini MENOLAK sinyal kalau jarak SL asli (sblm floor MIN_DIST_PCT diterapkan) terlalu
+# kecil. 0 = nonaktif.
+FILTER_MIN_DIST_PCT = float(os.environ.get('FILTER_MIN_DIST_PCT', 0.615))   # 0 = nonaktif
+FILTER_MAX_DIST_PCT = float(os.environ.get('FILTER_MAX_DIST_PCT', 0))       # 0 = nonaktif
+
 ALLOW_HEDGE = os.environ.get('ALLOW_HEDGE', 'true').lower() == 'true'
 def _pidx(side):
     return (1 if side == "Buy" else 2) if ALLOW_HEDGE else 0
@@ -503,6 +531,65 @@ def compute_ema_cross(df_closed):
     death_cross  = ema_fast[-2] >= ema_slow[-2] and ema_fast[-1] < ema_slow[-1]
     golden_cross = ema_fast[-2] <= ema_slow[-2] and ema_fast[-1] > ema_slow[-1]
     return death_cross, golden_cross
+
+
+def _calc_rsi(C, period):
+    """RSI standar (Wilder smoothing via EWM alpha=1/period). Rumus 100*avg_gain/(avg_gain+avg_loss)
+    dipakai langsung (bukan 100-100/(1+RS)) supaya kasus tepi avg_gain=avg_loss=0 (harga flat
+    berturut-turut) otomatis jadi NaN -- identik dgn implementasi yg sudah divalidasi di backtest_web.py
+    (dicocokkan terhadap pandas_ta sbg referensi independen, hasil 100% identik)."""
+    close = pd.Series(C)
+    delta = close.diff(1)
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    rsi = 100 * avg_gain / (avg_gain + avg_loss)
+    return rsi.values
+
+
+def compute_rsi_gate_value(df_closed):
+    """Nilai RSI(RSI_GATE_PERIOD) pada candle TERAKHIR (candle penyebab cross). None kalau
+    data belum cukup atau masih warmup (NaN)."""
+    if len(df_closed) < RSI_GATE_PERIOD + 2:
+        return None
+    rsi = _calc_rsi(df_closed['close'].values, RSI_GATE_PERIOD)
+    v = rsi[-1]
+    return None if np.isnan(v) else float(v)
+
+
+def passes_rsi_gate(df_closed, direction):
+    """Gate RSI TUNGGAL saat EMA cross (bukan filter statistik -- kondisi STRUKTURAL).
+    Logika DIBALIK dari RSI konvensional: dipakai sbg batas ATAS utk Long (tolak kalau RSI
+    sudah kelewat tinggi/jenuh-beli) dan batas BAWAH utk Short (tolak kalau RSI sudah kelewat
+    rendah/jenuh-jual). direction: 'Long' butuh RSI <= RSI_GATE_MAX_LONG; 'Short' butuh
+    RSI >= RSI_GATE_MIN_SHORT. True kalau gate nonaktif ATAU RSI belum tersedia (msh warmup)
+    -- fail-open spy tidak diam-diam menolak semua trade di awal data krn data kurang."""
+    if not RSI_GATE_ENABLED:
+        return True
+    v = compute_rsi_gate_value(df_closed)
+    if v is None:
+        return True
+    if direction == 'Long':
+        return v <= RSI_GATE_MAX_LONG
+    else:
+        return v >= RSI_GATE_MIN_SHORT
+
+
+def passes_dist_filter(dist, wick):
+    """FILTER Jarak SL dari entry (persen), dihitung dari dist & wick candle cross YANG SAMA
+    persis dgn yg akan dipakai memasang order (SEBELUM floor keamanan MIN_DIST_PCT diterapkan
+    di place_limit_order -- filter ini menolak sinyal, bukan memperlebar SL)."""
+    if FILTER_MIN_DIST_PCT <= 0 and FILTER_MAX_DIST_PCT <= 0:
+        return True   # filter nonaktif semua
+    if wick <= 0:
+        return False
+    dist_pct = dist / wick * 100
+    if FILTER_MIN_DIST_PCT > 0 and dist_pct < FILTER_MIN_DIST_PCT:
+        return False
+    if FILTER_MAX_DIST_PCT > 0 and dist_pct > FILTER_MAX_DIST_PCT:
+        return False
+    return True
 
 
 # ============================================================
@@ -816,40 +903,56 @@ def process_flip_and_entry(coin, df_closed, death_cross, golden_cross):
                       f"(belum sempat fill @ {p.get('entry',0):.6g}).")
             del pending[key_short]
 
-    # ---- 2) CROSS SEARAH -> pasang/ganti limit di wick ----
+    # ---- 2) CROSS SEARAH -> pasang/ganti limit di wick, TUNDUK ke GATE RSI & FILTER JARAK SL ----
     if death_cross and key_short in armed and key_short not in active_positions:
-        wick = h[last_i]; old_entry = c[last_i]; old_dist = wick - old_entry
-        if old_dist > 0:
-            sl = wick + old_dist
-            if key_short in pending:
-                cancel_order(coin, pending[key_short]['order_id'])
-                del pending[key_short]
-            if _count_slots() < MAX_CONCURRENT:
-                result = place_limit_order(coin, "Sell", wick, sl)
-                if result is not None:
-                    order_id, qty, entry_r, sl_r, dist = result
-                    pending[key_short] = {'coin': coin, 'direction': 'Short',
-                                           'entry': entry_r, 'sl': sl_r, 'dist': dist, 'order_id': order_id}
-                    log_entry(f"📉 {coin} [Short]: Death cross — limit SELL @ wick {entry_r:.6g} SL {sl_r:.6g}")
-            else:
-                print(f"⏭️  {coin} [Short]: slot penuh ({MAX_CONCURRENT}), skip.")
+        if not passes_rsi_gate(df_closed, 'Short'):
+            v = compute_rsi_gate_value(df_closed)
+            print(f"⏭️  {coin} [Short]: sinyal death cross tidak lolos gate RSI{RSI_GATE_PERIOD} "
+                  f"(nilai={v}, butuh >= {RSI_GATE_MIN_SHORT}), skip.")
+        else:
+            wick = h[last_i]; old_entry = c[last_i]; old_dist = wick - old_entry
+            if old_dist > 0 and not passes_dist_filter(old_dist, wick):
+                print(f"⏭️  {coin} [Short]: sinyal death cross tidak lolos filter Jarak SL "
+                      f"({old_dist/wick*100:.3f}%, butuh >= {FILTER_MIN_DIST_PCT}%), skip.")
+            elif old_dist > 0:
+                sl = wick + old_dist
+                if key_short in pending:
+                    cancel_order(coin, pending[key_short]['order_id'])
+                    del pending[key_short]
+                if _count_slots() < MAX_CONCURRENT:
+                    result = place_limit_order(coin, "Sell", wick, sl)
+                    if result is not None:
+                        order_id, qty, entry_r, sl_r, dist = result
+                        pending[key_short] = {'coin': coin, 'direction': 'Short',
+                                               'entry': entry_r, 'sl': sl_r, 'dist': dist, 'order_id': order_id}
+                        log_entry(f"📉 {coin} [Short]: Death cross — limit SELL @ wick {entry_r:.6g} SL {sl_r:.6g}")
+                else:
+                    print(f"⏭️  {coin} [Short]: slot penuh ({MAX_CONCURRENT}), skip.")
 
     if golden_cross and key_long in armed and key_long not in active_positions:
-        wick = l[last_i]; old_entry = c[last_i]; old_dist = old_entry - wick
-        if old_dist > 0:
-            sl = wick - old_dist
-            if key_long in pending:
-                cancel_order(coin, pending[key_long]['order_id'])
-                del pending[key_long]
-            if _count_slots() < MAX_CONCURRENT:
-                result = place_limit_order(coin, "Buy", wick, sl)
-                if result is not None:
-                    order_id, qty, entry_r, sl_r, dist = result
-                    pending[key_long] = {'coin': coin, 'direction': 'Long',
-                                          'entry': entry_r, 'sl': sl_r, 'dist': dist, 'order_id': order_id}
-                    log_entry(f"📈 {coin} [Long]: Golden cross — limit BUY @ wick {entry_r:.6g} SL {sl_r:.6g}")
-            else:
-                print(f"⏭️  {coin} [Long]: slot penuh ({MAX_CONCURRENT}), skip.")
+        if not passes_rsi_gate(df_closed, 'Long'):
+            v = compute_rsi_gate_value(df_closed)
+            print(f"⏭️  {coin} [Long]: sinyal golden cross tidak lolos gate RSI{RSI_GATE_PERIOD} "
+                  f"(nilai={v}, butuh <= {RSI_GATE_MAX_LONG}), skip.")
+        else:
+            wick = l[last_i]; old_entry = c[last_i]; old_dist = old_entry - wick
+            if old_dist > 0 and not passes_dist_filter(old_dist, wick):
+                print(f"⏭️  {coin} [Long]: sinyal golden cross tidak lolos filter Jarak SL "
+                      f"({old_dist/wick*100:.3f}%, butuh >= {FILTER_MIN_DIST_PCT}%), skip.")
+            elif old_dist > 0:
+                sl = wick - old_dist
+                if key_long in pending:
+                    cancel_order(coin, pending[key_long]['order_id'])
+                    del pending[key_long]
+                if _count_slots() < MAX_CONCURRENT:
+                    result = place_limit_order(coin, "Buy", wick, sl)
+                    if result is not None:
+                        order_id, qty, entry_r, sl_r, dist = result
+                        pending[key_long] = {'coin': coin, 'direction': 'Long',
+                                              'entry': entry_r, 'sl': sl_r, 'dist': dist, 'order_id': order_id}
+                        log_entry(f"📈 {coin} [Long]: Golden cross — limit BUY @ wick {entry_r:.6g} SL {sl_r:.6g}")
+                else:
+                    print(f"⏭️  {coin} [Long]: slot penuh ({MAX_CONCURRENT}), skip.")
 
 
 def manage_pending(coin):
@@ -892,6 +995,17 @@ def run_bot():
     print(f"CONFIG | EMA {EMA_FAST}/{EMA_SLOW} | trail aktif 1:{TRAIL_ACT_R:.0f} | trail width {TRAIL_STOP:.1f}x | "
           f"risk {RISK_PCT*100:.0f}%/trade | lev {LEVERAGE}x | slot max {MAX_CONCURRENT} | "
           f"HEDGE {'ON' if ALLOW_HEDGE else 'off'}")
+    filter_desc = []
+    if FILTER_MIN_DIST_PCT > 0:
+        filter_desc.append(f"JarakSL>={FILTER_MIN_DIST_PCT}%")
+    if FILTER_MAX_DIST_PCT > 0:
+        filter_desc.append(f"JarakSL<={FILTER_MAX_DIST_PCT}%")
+    print(f"FILTER  | {', '.join(filter_desc) if filter_desc else 'tidak ada (semua nonaktif)'}")
+    if RSI_GATE_ENABLED:
+        print(f"RSI GATE| RSI{RSI_GATE_PERIOD} AKTIF — Long butuh <= {RSI_GATE_MAX_LONG}, "
+              f"Short butuh >= {RSI_GATE_MIN_SHORT} (logika dibalik dari RSI konvensional)")
+    else:
+        print("RSI GATE| nonaktif")
     if not test_connection():
         print("⛔ Tidak bisa konek ke Bybit.")
         return
