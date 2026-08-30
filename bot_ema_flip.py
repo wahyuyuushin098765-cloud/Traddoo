@@ -26,21 +26,19 @@ RINGKASAN STRATEGI
 3. ENTRY via EMA CROSS (H1, EMA4 & EMA10):
    - Bias SHORT + death cross (EMA4 tembus ke bawah EMA10) -> pasang LIMIT SELL
      di harga WICK (high) candle yang menyebabkan cross.
-     SL = wick + jarak(wick, close candle cross) -- yaitu jarak yang sama
-     diperpanjang ke arah berlawanan dari wick.
+     SL = SL_PCT (default 0.3%) dari entry (wick), ke arah berlawanan dari wick --
+     BUKAN lagi jarak struktural candle.
    - Bias LONG + golden cross -> LIMIT BUY di wick (low) candle cross,
-     SL = wick - jarak yang sama.
+     SL = SL_PCT dari entry, arah berlawanan.
    - Kalau ada cross SEARAH baru sebelum limit lama sempat fill, limit lama
      diganti ke wick yang terbaru.
-   - GATE RSI TUNGGAL (RSI4, logika DIBALIK dari RSI konvensional): golden cross
-     (Long) valid HANYA jika RSI4 <= RSI_GATE_MAX_LONG (default 70) -- tolak kalau
-     sudah overbought. Death cross (Short) valid HANYA jika RSI4 >= RSI_GATE_MIN_SHORT
-     (default 40) -- tolak kalau sudah oversold. Dicek TEPAT di candle penyebab cross,
-     kondisi STRUKTURAL, bukan filter statistik. Bisa dimatikan via env var.
-   - FILTER JARAK SL: sinyal cuma dieksekusi kalau jarak SL dari entry (persen)
-     >= FILTER_MIN_DIST_PCT (default 0.615%) -- hasil riset backtest 45 coin ~1
-     tahun H1 menunjukkan sinyal dgn SL terlalu mepet punya win-rate lebih rendah.
-     Bisa dimatikan (isi 0) via env var.
+   - GATE RSI TUNGGAL (RSI4), rentang penuh terpisah Long & Short: golden cross
+     (Long) valid HANYA jika RSI_GATE_MIN_LONG <= RSI4 <= RSI_GATE_MAX_LONG
+     (default [41, 74]). Death cross (Short) valid HANYA jika RSI_GATE_MIN_SHORT
+     <= RSI4 <= RSI_GATE_MAX_SHORT (default [20, 50]). Diluar rentang = diblokir.
+     Dicek TEPAT di candle penyebab cross, kondisi STRUKTURAL, bukan filter
+     statistik. Rentang ini hasil riset backtest 45 coin ~1 tahun H1 (tabel
+     Analisis Khusus RSI Gate). Bisa diubah/dimatikan via env var.
 
 4. FLIP PROTECTION:
    - Kalau sedang PENDING (limit belum fill) atau ACTIVE (posisi terbuka) untuk
@@ -50,7 +48,7 @@ RINGKASAN STRATEGI
      re-entry, sampai support/resistance valid baru menggantikannya.
 
 5. TRAILING STOP native Bybit:
-   - Aktif otomatis setelah profit mencapai TRAIL_ACT_R x jarak(entry,SL) = 1:6.
+   - Aktif otomatis setelah profit mencapai TRAIL_ACT_R x jarak(entry,SL) = 1:4.
    - Lebar trailing = TRAIL_STOP x jarak (default 1x).
 ============================================================
 """
@@ -323,7 +321,7 @@ session = HTTP(testnet=TESTNET, api_key=API_KEY, api_secret=API_SECRET)
 TIMEFRAME        = "60"    # H1 saja
 EMA_FAST         = int(os.environ.get('EMA_FAST', 4))
 EMA_SLOW         = int(os.environ.get('EMA_SLOW', 10))
-TRAIL_ACT_R      = float(os.environ.get('TRAIL_ACT_R', 6.0))   # trailing aktif di rasio 1:6 dari SL
+TRAIL_ACT_R      = float(os.environ.get('TRAIL_ACT_R', 4.0))   # trailing aktif di rasio 1:4 dari SL
 TRAIL_STOP       = float(os.environ.get('TRAIL_STOP', 1.0))    # lebar trailing = 1x jarak(entry,SL)
 TRAIL_TIMEOUT_DAYS = 3      # safety net: force-close kalau peak macet N hari (None = matikan)
 RISK_PCT         = float(os.environ.get('RISK_PCT', 0.01))     # risk per trade = 1% equity
@@ -331,26 +329,23 @@ LEVERAGE         = int(os.environ.get('LEVERAGE', 25))
 MIN_ORDER_USD    = 5.0
 ORDER_BUMP_FLOOR = 4.0
 MAX_CONCURRENT   = int(os.environ.get('MAX_CONCURRENT', 10))
-MIN_DIST_PCT     = 0.002    # floor keamanan SL minimum 0.2% dari entry
+MIN_DIST_PCT     = 0.002    # floor keamanan SL minimum 0.2% dari entry (jaga2, seharusnya
+                             # tidak pernah kepakai krn SL_PCT default 0.3% > floor ini)
+SL_PCT           = float(os.environ.get('SL_PCT', 0.003))   # jarak SL = 0.3% dari entry (wick),
+                                                               # MENGGANTIKAN jarak struktural candle
 
 # GATE RSI TUNGGAL saat EMA cross (BUKAN filter statistik -- kondisi STRUKTURAL yg dicek
 # TEPAT di candle penyebab cross, sama level dgn syarat cross itu sendiri). Hasil riset
-# backtest 45 coin ~1 tahun H1: RSI4 (periode pendek, reaktif thd harga), logika DIBALIK
-# dari RSI konvensional (overbought=jangan-beli/oversold=jangan-jual) -- di sini overbought
-# JUSTRU jadi batas atas utk Long, oversold jadi batas bawah utk Short. Cocok utk strategi
-# momentum/breakout spt ini, bukan mean-reversion. Bisa dimatikan via Railway Variables.
-RSI_GATE_PERIOD    = int(os.environ.get('RSI_GATE_PERIOD', 4))
-RSI_GATE_ENABLED   = os.environ.get('RSI_GATE_ENABLED', 'true').lower() == 'true'
-RSI_GATE_MAX_LONG  = float(os.environ.get('RSI_GATE_MAX_LONG', 70))   # Long butuh RSI4 <= ini
-RSI_GATE_MIN_SHORT = float(os.environ.get('RSI_GATE_MIN_SHORT', 40))  # Short butuh RSI4 >= ini
-
-# FILTER Jarak SL dari entry (persen) saat cross. Hasil riset backtest: sinyal dgn jarak
-# SL >= ambang tertentu punya win-rate jauh lebih tinggi drpd sinyal dgn SL terlalu mepet.
-# TERPISAH dari MIN_DIST_PCT (yg cuma safety floor memperlebar SL, bukan menolak sinyal) --
-# filter ini MENOLAK sinyal kalau jarak SL asli (sblm floor MIN_DIST_PCT diterapkan) terlalu
-# kecil. 0 = nonaktif.
-FILTER_MIN_DIST_PCT = float(os.environ.get('FILTER_MIN_DIST_PCT', 0.615))   # 0 = nonaktif
-FILTER_MAX_DIST_PCT = float(os.environ.get('FILTER_MAX_DIST_PCT', 0))       # 0 = nonaktif
+# backtest 45 coin ~1 tahun H1 (tabel Analisis Khusus RSI Gate di dashboard backtest):
+# rentang RSI4 [41,74] utk Long dan [20,50] utk Short menunjukkan win-rate paling baik.
+# Diluar rentang = diblokir (sinyal dilewati, tidak entry). Bisa diubah/dimatikan via
+# Railway Variables.
+RSI_GATE_PERIOD     = int(os.environ.get('RSI_GATE_PERIOD', 4))
+RSI_GATE_ENABLED    = os.environ.get('RSI_GATE_ENABLED', 'true').lower() == 'true'
+RSI_GATE_MIN_LONG   = float(os.environ.get('RSI_GATE_MIN_LONG', 41))   # Long butuh RSI4 >= ini
+RSI_GATE_MAX_LONG   = float(os.environ.get('RSI_GATE_MAX_LONG', 74))   # Long butuh RSI4 <= ini
+RSI_GATE_MIN_SHORT  = float(os.environ.get('RSI_GATE_MIN_SHORT', 20))  # Short butuh RSI4 >= ini
+RSI_GATE_MAX_SHORT  = float(os.environ.get('RSI_GATE_MAX_SHORT', 50))  # Short butuh RSI4 <= ini
 
 ALLOW_HEDGE = os.environ.get('ALLOW_HEDGE', 'true').lower() == 'true'
 def _pidx(side):
@@ -560,36 +555,20 @@ def compute_rsi_gate_value(df_closed):
 
 def passes_rsi_gate(df_closed, direction):
     """Gate RSI TUNGGAL saat EMA cross (bukan filter statistik -- kondisi STRUKTURAL).
-    Logika DIBALIK dari RSI konvensional: dipakai sbg batas ATAS utk Long (tolak kalau RSI
-    sudah kelewat tinggi/jenuh-beli) dan batas BAWAH utk Short (tolak kalau RSI sudah kelewat
-    rendah/jenuh-jual). direction: 'Long' butuh RSI <= RSI_GATE_MAX_LONG; 'Short' butuh
-    RSI >= RSI_GATE_MIN_SHORT. True kalau gate nonaktif ATAU RSI belum tersedia (msh warmup)
-    -- fail-open spy tidak diam-diam menolak semua trade di awal data krn data kurang."""
+    Rentang penuh [MIN, MAX] terpisah utk Long & Short -- diluar rentang = diblokir.
+    direction: 'Long' butuh RSI_GATE_MIN_LONG <= RSI <= RSI_GATE_MAX_LONG; 'Short' butuh
+    RSI_GATE_MIN_SHORT <= RSI <= RSI_GATE_MAX_SHORT. True kalau gate nonaktif ATAU RSI
+    belum tersedia (msh warmup) -- fail-open spy tidak diam-diam menolak semua trade di
+    awal data krn data kurang."""
     if not RSI_GATE_ENABLED:
         return True
     v = compute_rsi_gate_value(df_closed)
     if v is None:
         return True
     if direction == 'Long':
-        return v <= RSI_GATE_MAX_LONG
+        return RSI_GATE_MIN_LONG <= v <= RSI_GATE_MAX_LONG
     else:
-        return v >= RSI_GATE_MIN_SHORT
-
-
-def passes_dist_filter(dist, wick):
-    """FILTER Jarak SL dari entry (persen), dihitung dari dist & wick candle cross YANG SAMA
-    persis dgn yg akan dipakai memasang order (SEBELUM floor keamanan MIN_DIST_PCT diterapkan
-    di place_limit_order -- filter ini menolak sinyal, bukan memperlebar SL)."""
-    if FILTER_MIN_DIST_PCT <= 0 and FILTER_MAX_DIST_PCT <= 0:
-        return True   # filter nonaktif semua
-    if wick <= 0:
-        return False
-    dist_pct = dist / wick * 100
-    if FILTER_MIN_DIST_PCT > 0 and dist_pct < FILTER_MIN_DIST_PCT:
-        return False
-    if FILTER_MAX_DIST_PCT > 0 and dist_pct > FILTER_MAX_DIST_PCT:
-        return False
-    return True
+        return RSI_GATE_MIN_SHORT <= v <= RSI_GATE_MAX_SHORT
 
 
 # ============================================================
@@ -903,18 +882,15 @@ def process_flip_and_entry(coin, df_closed, death_cross, golden_cross):
                       f"(belum sempat fill @ {p.get('entry',0):.6g}).")
             del pending[key_short]
 
-    # ---- 2) CROSS SEARAH -> pasang/ganti limit di wick, TUNDUK ke GATE RSI & FILTER JARAK SL ----
+    # ---- 2) CROSS SEARAH -> pasang/ganti limit di wick, TUNDUK ke GATE RSI (SL = SL_PCT tetap) ----
     if death_cross and key_short in armed and key_short not in active_positions:
         if not passes_rsi_gate(df_closed, 'Short'):
             v = compute_rsi_gate_value(df_closed)
             print(f"⏭️  {coin} [Short]: sinyal death cross tidak lolos gate RSI{RSI_GATE_PERIOD} "
-                  f"(nilai={v}, butuh >= {RSI_GATE_MIN_SHORT}), skip.")
+                  f"(nilai={v}, butuh [{RSI_GATE_MIN_SHORT}, {RSI_GATE_MAX_SHORT}]), skip.")
         else:
-            wick = h[last_i]; old_entry = c[last_i]; old_dist = wick - old_entry
-            if old_dist > 0 and not passes_dist_filter(old_dist, wick):
-                print(f"⏭️  {coin} [Short]: sinyal death cross tidak lolos filter Jarak SL "
-                      f"({old_dist/wick*100:.3f}%, butuh >= {FILTER_MIN_DIST_PCT}%), skip.")
-            elif old_dist > 0:
+            wick = h[last_i]; old_dist = wick * SL_PCT   # SL = SL_PCT dari entry (wick), bukan jarak struktural candle
+            if old_dist > 0:
                 sl = wick + old_dist
                 if key_short in pending:
                     cancel_order(coin, pending[key_short]['order_id'])
@@ -933,13 +909,10 @@ def process_flip_and_entry(coin, df_closed, death_cross, golden_cross):
         if not passes_rsi_gate(df_closed, 'Long'):
             v = compute_rsi_gate_value(df_closed)
             print(f"⏭️  {coin} [Long]: sinyal golden cross tidak lolos gate RSI{RSI_GATE_PERIOD} "
-                  f"(nilai={v}, butuh <= {RSI_GATE_MAX_LONG}), skip.")
+                  f"(nilai={v}, butuh [{RSI_GATE_MIN_LONG}, {RSI_GATE_MAX_LONG}]), skip.")
         else:
-            wick = l[last_i]; old_entry = c[last_i]; old_dist = old_entry - wick
-            if old_dist > 0 and not passes_dist_filter(old_dist, wick):
-                print(f"⏭️  {coin} [Long]: sinyal golden cross tidak lolos filter Jarak SL "
-                      f"({old_dist/wick*100:.3f}%, butuh >= {FILTER_MIN_DIST_PCT}%), skip.")
-            elif old_dist > 0:
+            wick = l[last_i]; old_dist = wick * SL_PCT   # SL = SL_PCT dari entry (wick), bukan jarak struktural candle
+            if old_dist > 0:
                 sl = wick - old_dist
                 if key_long in pending:
                     cancel_order(coin, pending[key_long]['order_id'])
@@ -994,16 +967,10 @@ def run_bot():
     print("BOT EMA-CROSS REVERSAL + FLIP PROTECTION — H1")
     print(f"CONFIG | EMA {EMA_FAST}/{EMA_SLOW} | trail aktif 1:{TRAIL_ACT_R:.0f} | trail width {TRAIL_STOP:.1f}x | "
           f"risk {RISK_PCT*100:.0f}%/trade | lev {LEVERAGE}x | slot max {MAX_CONCURRENT} | "
-          f"HEDGE {'ON' if ALLOW_HEDGE else 'off'}")
-    filter_desc = []
-    if FILTER_MIN_DIST_PCT > 0:
-        filter_desc.append(f"JarakSL>={FILTER_MIN_DIST_PCT}%")
-    if FILTER_MAX_DIST_PCT > 0:
-        filter_desc.append(f"JarakSL<={FILTER_MAX_DIST_PCT}%")
-    print(f"FILTER  | {', '.join(filter_desc) if filter_desc else 'tidak ada (semua nonaktif)'}")
+          f"HEDGE {'ON' if ALLOW_HEDGE else 'off'} | SL {SL_PCT*100:.2f}% dari entry")
     if RSI_GATE_ENABLED:
-        print(f"RSI GATE| RSI{RSI_GATE_PERIOD} AKTIF — Long butuh <= {RSI_GATE_MAX_LONG}, "
-              f"Short butuh >= {RSI_GATE_MIN_SHORT} (logika dibalik dari RSI konvensional)")
+        print(f"RSI GATE| RSI{RSI_GATE_PERIOD} AKTIF — Long butuh [{RSI_GATE_MIN_LONG}, {RSI_GATE_MAX_LONG}], "
+              f"Short butuh [{RSI_GATE_MIN_SHORT}, {RSI_GATE_MAX_SHORT}]")
     else:
         print("RSI GATE| nonaktif")
     if not test_connection():
