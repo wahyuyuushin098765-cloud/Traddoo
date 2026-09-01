@@ -39,6 +39,11 @@ RINGKASAN STRATEGI
      Dicek TEPAT di candle penyebab cross, kondisi STRUKTURAL, bukan filter
      statistik. Rentang ini hasil riset backtest 45 coin ~1 tahun H1 (tabel
      Analisis Khusus RSI Gate). Bisa diubah/dimatikan via env var.
+   - FILTER ATR: sinyal cuma dieksekusi kalau ukuran candle penyebab cross
+     (high-low) >= FILTER_MIN_ATR_RATIO x ATR14 (default 0.95x) -- hasil riset
+     backtest ("Dampak Filter Aktif"): WR naik dari 47.5% ke 53.4%, Total R naik
+     meski n_trade turun ~44% (trade yg dibuang lebih banyak yg kalah drpd yg
+     menang). Bisa dimatikan (isi 0) via env var.
 
 4. FLIP PROTECTION:
    - Kalau sedang PENDING (limit belum fill) atau ACTIVE (posisi terbuka) untuk
@@ -347,6 +352,15 @@ RSI_GATE_MAX_LONG   = float(os.environ.get('RSI_GATE_MAX_LONG', 74))   # Long bu
 RSI_GATE_MIN_SHORT  = float(os.environ.get('RSI_GATE_MIN_SHORT', 20))  # Short butuh RSI4 >= ini
 RSI_GATE_MAX_SHORT  = float(os.environ.get('RSI_GATE_MAX_SHORT', 50))  # Short butuh RSI4 <= ini
 
+# FILTER ATR: candle penyebab cross harus minimal sebesar rasio ini dari volatilitas
+# normalnya (ATR14) supaya sinyal dianggap valid. Hasil riset backtest 45 coin ~1 tahun
+# H1 (tabel "Dampak Filter Aktif" di dashboard backtest): ATR ratio >= 0.95x -> WR naik
+# dari 47.5% ke 53.4%, Total R naik meski n_trade turun ~44% (trade yg dibuang lebih
+# banyak yg kalah drpd yg menang). 0 = nonaktif.
+ATR_PERIOD           = int(os.environ.get('ATR_PERIOD', 14))
+FILTER_MIN_ATR_RATIO = float(os.environ.get('FILTER_MIN_ATR_RATIO', 0.95))   # 0 = nonaktif
+FILTER_MAX_ATR_RATIO = float(os.environ.get('FILTER_MAX_ATR_RATIO', 0))      # 0 = nonaktif
+
 ALLOW_HEDGE = os.environ.get('ALLOW_HEDGE', 'true').lower() == 'true'
 def _pidx(side):
     return (1 if side == "Buy" else 2) if ALLOW_HEDGE else 0
@@ -541,6 +555,40 @@ def _calc_rsi(C, period):
     avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
     rsi = 100 * avg_gain / (avg_gain + avg_loss)
     return rsi.values
+
+
+def compute_atr_ratio(df_closed):
+    """Rasio ukuran candle TERAKHIR (high-low) terhadap ATR14 -- dipakai sbg filter kualitas
+    sinyal (hasil riset: candle penyebab cross yg lebih besar dari ATR normalnya punya win
+    rate jauh lebih tinggi). None kalau data belum cukup."""
+    if len(df_closed) < ATR_PERIOD + 2:
+        return None
+    h = df_closed['high'].values; l = df_closed['low'].values; c = df_closed['close'].values
+    prev_close = np.roll(c, 1)
+    prev_close[0] = c[0]
+    tr = np.maximum(h - l, np.maximum(np.abs(h - prev_close), np.abs(l - prev_close)))
+    atr = pd.Series(tr).rolling(ATR_PERIOD, min_periods=1).mean().values
+    last_range = h[-1] - l[-1]
+    if atr[-1] <= 0:
+        return None
+    return last_range / atr[-1]
+
+
+def passes_atr_filter(df_closed):
+    """FILTER ATR (bukan gate RSI). True kalau filter nonaktif ATAU rasio ATR candle cross
+    ini berada dalam batas yg diizinkan. False kalau data belum cukup utk hitung ATR --
+    aman, jangan entry dulu (beda dgn gate RSI yg fail-open, filter ini fail-closed krn
+    tidak ada nilai default yg masuk akal utk 'belum tahu volatilitas normalnya')."""
+    if FILTER_MIN_ATR_RATIO <= 0 and FILTER_MAX_ATR_RATIO <= 0:
+        return True   # filter nonaktif semua
+    ratio = compute_atr_ratio(df_closed)
+    if ratio is None:
+        return False   # data belum cukup utk ATR -> aman, jangan entry dulu
+    if FILTER_MIN_ATR_RATIO > 0 and ratio < FILTER_MIN_ATR_RATIO:
+        return False
+    if FILTER_MAX_ATR_RATIO > 0 and ratio > FILTER_MAX_ATR_RATIO:
+        return False
+    return True
 
 
 def compute_rsi_gate_value(df_closed):
@@ -882,12 +930,16 @@ def process_flip_and_entry(coin, df_closed, death_cross, golden_cross):
                       f"(belum sempat fill @ {p.get('entry',0):.6g}).")
             del pending[key_short]
 
-    # ---- 2) CROSS SEARAH -> pasang/ganti limit di wick, TUNDUK ke GATE RSI (SL = SL_PCT tetap) ----
+    # ---- 2) CROSS SEARAH -> pasang/ganti limit di wick, TUNDUK ke GATE RSI & FILTER ATR (SL = SL_PCT tetap) ----
     if death_cross and key_short in armed and key_short not in active_positions:
         if not passes_rsi_gate(df_closed, 'Short'):
             v = compute_rsi_gate_value(df_closed)
             print(f"⏭️  {coin} [Short]: sinyal death cross tidak lolos gate RSI{RSI_GATE_PERIOD} "
                   f"(nilai={v}, butuh [{RSI_GATE_MIN_SHORT}, {RSI_GATE_MAX_SHORT}]), skip.")
+        elif not passes_atr_filter(df_closed):
+            r = compute_atr_ratio(df_closed)
+            print(f"⏭️  {coin} [Short]: sinyal death cross tidak lolos filter ATR "
+                  f"(rasio={r}, butuh >= {FILTER_MIN_ATR_RATIO}x), skip.")
         else:
             wick = h[last_i]; old_dist = wick * SL_PCT   # SL = SL_PCT dari entry (wick), bukan jarak struktural candle
             if old_dist > 0:
@@ -910,6 +962,10 @@ def process_flip_and_entry(coin, df_closed, death_cross, golden_cross):
             v = compute_rsi_gate_value(df_closed)
             print(f"⏭️  {coin} [Long]: sinyal golden cross tidak lolos gate RSI{RSI_GATE_PERIOD} "
                   f"(nilai={v}, butuh [{RSI_GATE_MIN_LONG}, {RSI_GATE_MAX_LONG}]), skip.")
+        elif not passes_atr_filter(df_closed):
+            r = compute_atr_ratio(df_closed)
+            print(f"⏭️  {coin} [Long]: sinyal golden cross tidak lolos filter ATR "
+                  f"(rasio={r}, butuh >= {FILTER_MIN_ATR_RATIO}x), skip.")
         else:
             wick = l[last_i]; old_dist = wick * SL_PCT   # SL = SL_PCT dari entry (wick), bukan jarak struktural candle
             if old_dist > 0:
@@ -973,6 +1029,12 @@ def run_bot():
               f"Short butuh [{RSI_GATE_MIN_SHORT}, {RSI_GATE_MAX_SHORT}]")
     else:
         print("RSI GATE| nonaktif")
+    filter_desc = []
+    if FILTER_MIN_ATR_RATIO > 0:
+        filter_desc.append(f"ATR>={FILTER_MIN_ATR_RATIO}x")
+    if FILTER_MAX_ATR_RATIO > 0:
+        filter_desc.append(f"ATR<={FILTER_MAX_ATR_RATIO}x")
+    print(f"FILTER  | {', '.join(filter_desc) if filter_desc else 'tidak ada (semua nonaktif)'}")
     if not test_connection():
         print("⛔ Tidak bisa konek ke Bybit.")
         return
