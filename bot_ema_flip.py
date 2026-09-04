@@ -47,9 +47,14 @@ RINGKASAN STRATEGI
      sebelum candle cross, kondisi STRUKTURAL. Bisa dimatikan via env var.
 
 4. FLIP PROTECTION:
-   - Kalau sedang PENDING (limit belum fill) atau ACTIVE (posisi terbuka) untuk
-     satu arah, dan tiba-tiba muncul EMA cross BERLAWANAN -> limit dibatalkan /
-     posisi ditutup market SEKARANG JUGA, tidak peduli profit atau rugi.
+   - Limit PENDING (belum fill): EMA cross BERLAWANAN langsung membatalkan,
+     tidak ada syarat apapun (belum ada entry, jadi tidak ada urusan profit).
+   - Posisi ACTIVE (sudah filled): HANYA ditutup market kalau CLOSE candle yang
+     menyebabkan cross berlawanan itu sudah >= FLIP_MIN_R dari entry (dihitung
+     dari entry & jarak SL posisi itu -- misal entry $1.6, SL $1.3, dist=$0.3,
+     FLIP_MIN_R=1.0 -> close candle cross harus > $1.9 baru boleh membatalkan
+     Long). Dibawah ambang ini (termasuk floating loss), posisi DIBIARKAN jalan
+     terus, cuma keluar lewat TRAIL/SL normal. Bisa diubah via env var FLIP_MIN_R.
    - Bias (armed) tetap hidup, lanjut menunggu cross SEARAH berikutnya untuk
      re-entry, sampai support/resistance valid baru menggantikannya.
 
@@ -361,6 +366,15 @@ RSI_GATE_MAX_SHORT  = float(os.environ.get('RSI_GATE_MAX_SHORT', 50))  # Short b
 # Golden cross -> candle 1-sebelum-cross harus SWING LOW:
 #   low[i-1] < low[i-2] (kiri) DAN low[i-1] < low[i] (kanan).
 SWING_GATE_ENABLED = os.environ.get('SWING_GATE_ENABLED', 'true').lower() == 'true'
+
+# FLIP MIN R: posisi yang SUDAH FILLED hanya ditutup oleh cross berlawanan (flip) kalau
+# CLOSE candle yang menyebabkan cross berlawanan itu (bukan candle setelahnya) sudah
+# >= FLIP_MIN_R dari entry (dihitung dari entry & jarak SL posisi itu). Contoh: entry $1.6,
+# SL $1.3 (dist=$0.3, FLIP_MIN_R=1.0) -> close candle cross harus > $1.9 baru boleh
+# membatalkan posisi Long itu. Kalau msh dibawah ambang ini (termasuk floating loss), posisi
+# DIBIARKAN jalan terus, cuma keluar lewat TRAIL/SL normal. Limit PENDING (belum filled)
+# TIDAK terpengaruh -- tetap dibatalkan seperti biasa oleh cross berlawanan, apapun nilainya.
+FLIP_MIN_R = float(os.environ.get('FLIP_MIN_R', 1.0))
 
 ALLOW_HEDGE = os.environ.get('ALLOW_HEDGE', 'true').lower() == 'true'
 def _pidx(side):
@@ -879,7 +893,8 @@ def update_armed_bias(coin, events):
 
 
 def process_flip_and_entry(coin, df_closed, death_cross, golden_cross):
-    """1) FLIP PROTECTION: cross berlawanan -> batalkan pending / tutup posisi SEKARANG.
+    """1) FLIP PROTECTION: cross berlawanan -> limit pending SELALU dibatalkan; posisi
+       filled HANYA ditutup kalau close candle cross sudah >= FLIP_MIN_R dari entry.
        2) Cross SEARAH + armed masih hidup -> pasang/ganti limit di wick candle cross."""
     h = df_closed['high'].values; l = df_closed['low'].values; c = df_closed['close'].values
     last_i = len(df_closed) - 1   # index candle H1 yang baru saja closed (penyebab cross)
@@ -888,15 +903,26 @@ def process_flip_and_entry(coin, df_closed, death_cross, golden_cross):
     key_short = _akey(coin, 'Short')
 
     # ---- 1) FLIP PROTECTION ----
+    # Posisi FILLED: HANYA ditutup kalau CLOSE candle yang menyebabkan cross berlawanan ini
+    # (c[last_i], candle cross itu sendiri -- BUKAN candle setelahnya) sudah >= FLIP_MIN_R
+    # dari entry (dihitung dari entry & dist posisi itu). Dibawah ambang ini (termasuk
+    # floating loss), posisi DIBIARKAN jalan terus -- cuma keluar lewat TRAIL/SL normal.
+    # Limit PENDING TIDAK terpengaruh ambang ini -- tetap dibatalkan seperti biasa.
+    close_at_cross = c[last_i]
     if death_cross:
         if key_long in active_positions:
             p = active_positions[key_long]
-            pos = get_open_position(coin, 'Buy')
-            if pos is not None:
-                close_position(coin, 'Buy', pos.get('size', '0'), reason="flip protection (death cross)")
-            log_entry(f"🔄 {coin} [Long]: FLIP — death cross muncul, posisi Long ditutup paksa "
-                      f"(entry {p.get('entry',0):.6g}).")
-            del active_positions[key_long]
+            current_r = (close_at_cross - p['entry']) / p['dist'] if p['dist'] > 0 else 0
+            if current_r >= FLIP_MIN_R - 1e-9:
+                pos = get_open_position(coin, 'Buy')
+                if pos is not None:
+                    close_position(coin, 'Buy', pos.get('size', '0'), reason="flip protection (death cross)")
+                log_entry(f"🔄 {coin} [Long]: FLIP — death cross muncul di {current_r:.2f}R (>= {FLIP_MIN_R}R), "
+                          f"posisi Long ditutup paksa (entry {p.get('entry',0):.6g}).")
+                del active_positions[key_long]
+            else:
+                print(f"🛡️  {coin} [Long]: death cross muncul tp posisi msh {current_r:.2f}R "
+                      f"(< {FLIP_MIN_R}R) — DIBIARKAN jalan, tidak di-flip.")
         if key_long in pending:
             p = pending[key_long]
             cancel_order(coin, p['order_id'])
@@ -907,12 +933,17 @@ def process_flip_and_entry(coin, df_closed, death_cross, golden_cross):
     if golden_cross:
         if key_short in active_positions:
             p = active_positions[key_short]
-            pos = get_open_position(coin, 'Sell')
-            if pos is not None:
-                close_position(coin, 'Sell', pos.get('size', '0'), reason="flip protection (golden cross)")
-            log_entry(f"🔄 {coin} [Short]: FLIP — golden cross muncul, posisi Short ditutup paksa "
-                      f"(entry {p.get('entry',0):.6g}).")
-            del active_positions[key_short]
+            current_r = (p['entry'] - close_at_cross) / p['dist'] if p['dist'] > 0 else 0
+            if current_r >= FLIP_MIN_R - 1e-9:
+                pos = get_open_position(coin, 'Sell')
+                if pos is not None:
+                    close_position(coin, 'Sell', pos.get('size', '0'), reason="flip protection (golden cross)")
+                log_entry(f"🔄 {coin} [Short]: FLIP — golden cross muncul di {current_r:.2f}R (>= {FLIP_MIN_R}R), "
+                          f"posisi Short ditutup paksa (entry {p.get('entry',0):.6g}).")
+                del active_positions[key_short]
+            else:
+                print(f"🛡️  {coin} [Short]: golden cross muncul tp posisi msh {current_r:.2f}R "
+                      f"(< {FLIP_MIN_R}R) — DIBIARKAN jalan, tidak di-flip.")
         if key_short in pending:
             p = pending[key_short]
             cancel_order(coin, p['order_id'])
@@ -1021,6 +1052,8 @@ def run_bot():
         print("SWING GATE| AKTIF — candle sebelum-cross harus swing point asli (bukan sekadar lanjutan tren)")
     else:
         print("SWING GATE| nonaktif")
+    print(f"FLIP    | Posisi filled hanya ditutup jika close candle cross >= {FLIP_MIN_R}R dari entry "
+          f"(dibawah itu dibiarkan jalan). Limit pending tetap dibatalkan tanpa syarat.")
     if not test_connection():
         print("⛔ Tidak bisa konek ke Bybit.")
         return
