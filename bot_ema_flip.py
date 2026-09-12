@@ -1,66 +1,42 @@
 """
 ============================================================
-BOT EMA-CROSS REVERSAL DARI SUPPORT/RESISTANCE (H1) + FLIP PROTECTION
+BOT RESISTANCE MURNI (H1) — LIMIT SELL DI UJUNG WICK C1
 ============================================================
-Strategi final hasil riset & backtest (XRPUSDT 10 bulan H1):
-  Entry wick + flip protection, rasio aktivasi trailing 1:6
-  -> Total +249.45R, win rate 42.7%, avg +1.066R/trade (backtest).
+Strategi diganti total dari versi EMA-cross/flip sebelumnya. Sekarang
+memakai strategi hasil backtest_snr.py: Resistance murni, TANPA EMA cross,
+TANPA RSI gate, TANPA swing gate, TANPA flip protection. Support SUDAH
+DIHILANGKAN -- bot ini HANYA entry Short.
 
 RINGKASAN STRATEGI
 ------------------
-1. DETEKSI SUPPORT/RESISTANCE (H1, basis body candle):
-   - Support: C1 turun (close<open), C2 naik (close>open), C3 low HARUS
-     lebih tinggi dari level S=C1.close (strict, tidak boleh sama/lebih rendah).
-   - Resistance: kebalikannya (C1 naik, C2 turun, C3 high harus lebih rendah dari R).
-   - VALID kalau wick pembentuknya (min/max low-high C1,C2) menyentuh level
-     S/R SEBELUMNYA yang masih "hidup" (belum ditembus close candle manapun).
-     Kalau level sebelumnya sudah rusak, fallback ke level hidup lebih lama,
-     atau None kalau tak ada -> tidak valid.
+1. DETEKSI RESISTANCE (H1, basis body candle):
+   - C1 bullish (close>open), C2 bearish (close<open). Level = close[C1].
+   - KIRI: 5 candle SEBELUM C1 -- wick (high) tidak boleh melebihi level.
+   - KANAN: 5 candle SETELAH C1,C2 (C3..C7) -- wick (high) tidak boleh
+     menyentuh level SAMA SEKALI, semua 5 candle harus bersih.
+   - WICK: C1 wajib punya wick atas sungguhan (beda dari body). Wick atas
+     C2 harus LEBIH PANJANG dari wick C1. Kalau tidak terpenuhi, level
+     gugur (tidak pernah dipakai).
 
-2. ARAH DIBALIK (mean-reversion jadi momentum):
-   - Support valid -> arm bias SHORT (bukan long).
-   - Resistance valid -> arm bias LONG (bukan short).
-   Bias ini TETAP HIDUP untuk dipakai berkali-kali (re-entry berulang),
-   sampai muncul support/resistance valid yang BENAR-BENAR baru (mengganti bias lama).
+2. ENTRY (begitu C7 closed & semua syarat di atas terpenuhi):
+   - LANGSUNG pasang LIMIT SELL (GTC) di harga UJUNG WICK C1 (high[C1]),
+     BUKAN di body/level. Order ini nyata nangkring di orderbook Bybit --
+     tidak ada simulasi "approach/arm" seperti di backtest (karena di live
+     order limitnya memang benar-benar terpasang, tinggal nunggu harga
+     kesana).
+   - SL = SL_PCT dari entry (di atas entry, karena Short).
+   - Tiap level HANYA dipakai 1x (tidak ada re-entry, tidak ada bias yang
+     "hidup" menunggu sinyal lain seperti versi lama).
 
-3. ENTRY via EMA CROSS (H1, EMA4 & EMA10):
-   - Bias SHORT + death cross (EMA4 tembus ke bawah EMA10) -> pasang LIMIT SELL
-     di harga WICK (high) candle yang menyebabkan cross.
-     SL = SL_PCT (default 0.3%) dari entry (wick), ke arah berlawanan dari wick --
-     BUKAN lagi jarak struktural candle.
-   - Bias LONG + golden cross -> LIMIT BUY di wick (low) candle cross,
-     SL = SL_PCT dari entry, arah berlawanan.
-   - Kalau ada cross SEARAH baru sebelum limit lama sempat fill, limit lama
-     diganti ke wick yang terbaru.
-   - GATE RSI TUNGGAL (RSI4), rentang penuh terpisah Long & Short: golden cross
-     (Long) valid HANYA jika RSI_GATE_MIN_LONG <= RSI4 <= RSI_GATE_MAX_LONG
-     (default [41, 74]). Death cross (Short) valid HANYA jika RSI_GATE_MIN_SHORT
-     <= RSI4 <= RSI_GATE_MAX_SHORT (default [24, 50]). Diluar rentang = diblokir.
-     Dicek TEPAT di candle penyebab cross, kondisi STRUKTURAL, bukan filter
-     statistik. Rentang ini hasil riset backtest 45 coin ~1 tahun H1 (tabel
-     Analisis Khusus RSI Gate). Bisa diubah/dimatikan via env var.
-   - GATE SWING 3-CANDLE: candle TEPAT SEBELUM candle penyebab cross harus jadi
-     swing point asli, bukan cuma pergerakan lanjutan tren. Death cross -> candle
-     sebelum-cross harus swing HIGH (high-nya lebih tinggi dari candle di kiri
-     MAUPUN kanannya/candle cross). Golden cross -> candle sebelum-cross harus
-     swing LOW (low-nya lebih rendah dari kiri maupun kanan). Dicek TEPAT
-     sebelum candle cross, kondisi STRUKTURAL. Bisa dimatikan via env var.
+3. TRAILING STOP native Bybit:
+   - Aktif otomatis setelah profit mencapai TRAIL_ACT_R x jarak(entry,SL).
+   - Lebar trailing = TRAIL_STOP x jarak.
 
-4. FLIP PROTECTION:
-   - Limit PENDING (belum fill): EMA cross BERLAWANAN langsung membatalkan,
-     tidak ada syarat apapun (belum ada entry, jadi tidak ada urusan profit).
-   - Posisi ACTIVE (sudah filled): HANYA ditutup market kalau CLOSE candle yang
-     menyebabkan cross berlawanan itu sudah >= FLIP_MIN_R dari entry (dihitung
-     dari entry & jarak SL posisi itu -- misal entry $1.6, SL $1.3, dist=$0.3,
-     FLIP_MIN_R=1.0 -> close candle cross harus > $1.9 baru boleh membatalkan
-     Long). Dibawah ambang ini (termasuk floating loss), posisi DIBIARKAN jalan
-     terus, cuma keluar lewat TRAIL/SL normal. Bisa diubah via env var FLIP_MIN_R.
-   - Bias (armed) tetap hidup, lanjut menunggu cross SEARAH berikutnya untuk
-     re-entry, sampai support/resistance valid baru menggantikannya.
-
-5. TRAILING STOP native Bybit:
-   - Aktif otomatis setelah profit mencapai TRAIL_ACT_R x jarak(entry,SL) = 1:4.
-   - Lebar trailing = TRAIL_STOP x jarak (default 1x).
+Fitur yang DIHAPUS dari versi sebelumnya (sudah tidak relevan dengan
+strategi baru ini): EMA cross (EMA_FAST/EMA_SLOW), RSI gate, swing gate,
+flip protection (FLIP_MIN_R), bias Support/Long. Env var terkait fitur2
+itu (EMA_FAST, EMA_SLOW, RSI_GATE_*, SWING_GATE_ENABLED, FLIP_MIN_R) boleh
+tetap ada di Railway (tidak dipakai lagi, tidak error) atau dihapus.
 ============================================================
 """
 
@@ -328,53 +304,20 @@ if not API_KEY or not API_SECRET:
 
 session = HTTP(testnet=TESTNET, api_key=API_KEY, api_secret=API_SECRET)
 
-# ── Strategy params (hasil backtest terbaik: XRPUSDT 10 bulan H1) ──
+# ── Strategy params (Resistance murni, hasil backtest_snr.py) ──
 TIMEFRAME        = "60"    # H1 saja
-EMA_FAST         = int(os.environ.get('EMA_FAST', 4))
-EMA_SLOW         = int(os.environ.get('EMA_SLOW', 10))
-TRAIL_ACT_R      = float(os.environ.get('TRAIL_ACT_R', 4.0))   # trailing aktif di rasio 1:4 dari SL
-TRAIL_STOP       = float(os.environ.get('TRAIL_STOP', 1.0))    # lebar trailing = 1x jarak(entry,SL)
+TRAIL_ACT_R      = float(os.environ.get('TRAIL_ACT_R', 4.0))   # trailing aktif di rasio 1:TRAIL_ACT_R dari SL
+TRAIL_STOP       = float(os.environ.get('TRAIL_STOP', 1.0))    # lebar trailing = TRAIL_STOP x jarak(entry,SL)
 TRAIL_TIMEOUT_DAYS = 3      # safety net: force-close kalau peak macet N hari (None = matikan)
 RISK_PCT         = float(os.environ.get('RISK_PCT', 0.01))     # risk per trade = 1% equity
 LEVERAGE         = int(os.environ.get('LEVERAGE', 25))
 MIN_ORDER_USD    = 5.0
 ORDER_BUMP_FLOOR = 4.0
 MAX_CONCURRENT   = int(os.environ.get('MAX_CONCURRENT', 10))
-MIN_DIST_PCT     = 0.002    # floor keamanan SL minimum 0.2% dari entry (jaga2, seharusnya
-                             # tidak pernah kepakai krn SL_PCT default 0.3% > floor ini)
-SL_PCT           = float(os.environ.get('SL_PCT', 0.003))   # jarak SL = 0.3% dari entry (wick),
-                                                               # MENGGANTIKAN jarak struktural candle
-
-# GATE RSI TUNGGAL saat EMA cross (BUKAN filter statistik -- kondisi STRUKTURAL yg dicek
-# TEPAT di candle penyebab cross, sama level dgn syarat cross itu sendiri). Hasil riset
-# backtest 45 coin ~1 tahun H1 (tabel Analisis Khusus RSI Gate di dashboard backtest):
-# rentang RSI4 [41,74] utk Long dan [20,50] utk Short menunjukkan win-rate paling baik.
-# Diluar rentang = diblokir (sinyal dilewati, tidak entry). Bisa diubah/dimatikan via
-# Railway Variables.
-RSI_GATE_PERIOD     = int(os.environ.get('RSI_GATE_PERIOD', 4))
-RSI_GATE_ENABLED    = os.environ.get('RSI_GATE_ENABLED', 'true').lower() == 'true'
-RSI_GATE_MIN_LONG   = float(os.environ.get('RSI_GATE_MIN_LONG', 41))   # Long butuh RSI4 >= ini
-RSI_GATE_MAX_LONG   = float(os.environ.get('RSI_GATE_MAX_LONG', 74))   # Long butuh RSI4 <= ini
-RSI_GATE_MIN_SHORT  = float(os.environ.get('RSI_GATE_MIN_SHORT', 24))  # Short butuh RSI4 >= ini
-RSI_GATE_MAX_SHORT  = float(os.environ.get('RSI_GATE_MAX_SHORT', 50))  # Short butuh RSI4 <= ini
-
-# GATE SWING 3-CANDLE (BUKAN filter statistik -- kondisi STRUKTURAL, dicek di candle
-# TEPAT SEBELUM candle penyebab cross). Tujuannya: pastikan candle sebelum cross itu betulan
-# swing point (titik balik lokal), bukan cuma pergerakan lanjutan tren sebelumnya.
-# Death cross (candle cross biasanya bearish) -> candle 1-sebelum-cross harus SWING HIGH:
-#   high[i-1] > high[i-2] (kiri) DAN high[i-1] > high[i] (kanan, candle cross itu sendiri).
-# Golden cross -> candle 1-sebelum-cross harus SWING LOW:
-#   low[i-1] < low[i-2] (kiri) DAN low[i-1] < low[i] (kanan).
-SWING_GATE_ENABLED = os.environ.get('SWING_GATE_ENABLED', 'true').lower() == 'true'
-
-# FLIP MIN R: posisi yang SUDAH FILLED hanya ditutup oleh cross berlawanan (flip) kalau
-# CLOSE candle yang menyebabkan cross berlawanan itu (bukan candle setelahnya) sudah
-# >= FLIP_MIN_R dari entry (dihitung dari entry & jarak SL posisi itu). Contoh: entry $1.6,
-# SL $1.3 (dist=$0.3, FLIP_MIN_R=1.0) -> close candle cross harus > $1.9 baru boleh
-# membatalkan posisi Long itu. Kalau msh dibawah ambang ini (termasuk floating loss), posisi
-# DIBIARKAN jalan terus, cuma keluar lewat TRAIL/SL normal. Limit PENDING (belum filled)
-# TIDAK terpengaruh -- tetap dibatalkan seperti biasa oleh cross berlawanan, apapun nilainya.
-FLIP_MIN_R = float(os.environ.get('FLIP_MIN_R', 1.0))
+MIN_DIST_PCT     = float(os.environ.get('MIN_DIST_PCT', 0.002))   # floor keamanan SL minimum
+                             # dari entry (jaga2, seharusnya tidak pernah kepakai krn SL_PCT
+                             # default > floor ini)
+SL_PCT           = float(os.environ.get('SL_PCT', 0.02))   # jarak SL dari entry (wick c1)
 
 ALLOW_HEDGE = os.environ.get('ALLOW_HEDGE', 'true').lower() == 'true'
 def _pidx(side):
@@ -382,21 +325,28 @@ def _pidx(side):
 def _akey(coin, direction):
     return f"{coin}|{direction}" if ALLOW_HEDGE else coin
 
+# Hasil backtest strategi Resistance murni (1 tahun H1) -- hanya koin dengan
+# ROI% > 0 yang dipakai bot live ini.
 SYMBOLS = [
-    'XPLUSDT', 'MNTUSDT', 'PLUMEUSDT', 'HYPEUSDT', 'BNBUSDT', 'BELUSDT', 'BERAUSDT', 'DASHUSDT',
-    'DOGEUSDT', 'USUALUSDT', 'TAOUSDT', 'ESPORTSUSDT', 'LABUSDT', 'HUSDT', 'AVAXUSDT', 'REUSDT',
-    '1000BONKUSDT', 'ORCAUSDT', 'AAVEUSDT', 'GMXUSDT', 'LTCUSDT', 'ICPUSDT', 'VIRTUALUSDT', 'CFXUSDT',
-    'UNIUSDT', 'ONDOUSDT', 'SUIUSDT', 'ALGOUSDT', 'HBARUSDT', 'EIGENUSDT', 'XRPUSDT', 'SOLUSDT',
-    'CRVUSDT', 'RENDERUSDT', 'XVGUSDT', 'SANDUSDT', 'AXSUSDT', 'IMXUSDT', 'FARTCOINUSDT', 'OPUSDT',
-    '1000PEPEUSDT', 'TIAUSDT', 'GALAUSDT', 'APEUSDT', 'FLOWUSDT',
+    'CFXUSDT',    # +31.7%
+    'LTCUSDT',    # +22.0%
+    'GALAUSDT',   # +21.7%
+    'AVAXUSDT',   # +10.8%
+    'SOLUSDT',    # +10.4%
+    'SANDUSDT',   # +9.1%
+    'DOGEUSDT',   # +9.1%
+    'UNIUSDT',    # +7.6%
+    'MNTUSDT',    # +6.7%
+    'ORCAUSDT',   # +6.3%
+    'DASHUSDT',   # +5.3%
+    'XVGUSDT',    # +3.6%
+    'AAVEUSDT',   # +2.3%
 ]
 
 bot_start_ts      = 0
-armed             = {}   # _akey -> {'c1_ts'} -- bias arah masih hidup (support->Short / resistance->Long)
 pending           = {}   # _akey -> {'coin','direction','entry','sl','dist','order_id'}
 active_positions  = {}   # _akey -> {'coin','side','entry','sl','dist','trail_dist','trail_set',...}
-last_seen         = {}   # f"{coin}|support"/"resistance" -> ts candle C1 terakhir yg sudah diproses (dedup S/R)
-last_cross_ts     = {}   # coin -> ts candle terakhir yg sudah dicek utk EMA cross (dedup cross)
+last_seen         = {}   # coin -> confirm_ts level resistance TERAKHIR yg sudah diproses (dedup)
 
 instrument_cache = {}
 
@@ -408,8 +358,8 @@ STATE_FILE = os.environ.get("STATE_FILE_PATH", "bot_state.json")
 def save_state():
     try:
         data = {
-            "armed": armed, "pending": pending, "active_positions": active_positions,
-            "last_seen": last_seen, "last_cross_ts": last_cross_ts,
+            "pending": pending, "active_positions": active_positions,
+            "last_seen": last_seen,
         }
         tmp_path = STATE_FILE + ".tmp"
         with open(tmp_path, "w") as f:
@@ -419,19 +369,17 @@ def save_state():
         print(f"⚠️ save_state gagal: {e}")
 
 def load_state():
-    global armed, pending, active_positions, last_seen, last_cross_ts
+    global pending, active_positions, last_seen
     if not os.path.exists(STATE_FILE):
         print(f"ℹ️ {STATE_FILE} belum ada — mulai dari kosong (normal di run pertama).")
         return
     try:
         with open(STATE_FILE, "r") as f:
             data = json.load(f)
-        armed             = data.get("armed", {})
         pending           = data.get("pending", {})
         active_positions  = data.get("active_positions", {})
         last_seen         = data.get("last_seen", {})
-        last_cross_ts     = data.get("last_cross_ts", {})
-        print(f"✅ State dimuat: {len(armed)} armed, {len(pending)} pending, "
+        print(f"✅ State dimuat: {len(pending)} pending, "
               f"{len(active_positions)} posisi aktif.")
     except Exception as e:
         print(f"⚠️ load_state gagal ({e}) — mulai dari kosong.")
@@ -494,133 +442,49 @@ def round_price(price, tick):
 # DETEKSI SUPPORT / RESISTANCE (H1, basis body candle) — sumber bias arah
 # ============================================================
 
-def find_sr_events(df):
+# ============================================================
+# DETEKSI RESISTANCE (H1, basis body candle) — Resistance murni,
+# port dari backtest_snr.py. Support SUDAH DIHILANGKAN.
+# ============================================================
+
+N_LEFT   = 5    # candle kiri yang wajib bersih (wick tidak boleh melebihi level)
+N_RIGHT  = 5    # candle kanan yang wajib bersih (wick tidak boleh menyentuh level)
+WICK_EPS = 1e-9   # beda minimum supaya wick dianggap "ada" (tidak sama dgn body)
+
+def find_levels(df):
+    """Deteksi level Resistance dari candle H1 (basis body candle).
+    C1 bullish -> C2 bearish. Level = close[C1]. Valid kalau:
+      - KIRI : 5 candle sebelum C1, wick (high) tidak boleh melebihi level.
+      - KANAN: 5 candle setelah C2 (C3..C7), wick (high) tidak boleh
+        menyentuh level SAMA SEKALI, semua 5 candle harus bersih.
+      - WICK : C1 wajib punya wick atas sungguhan (beda dari body), dan
+        wick atas C2 harus LEBIH PANJANG dari wick C1.
+    entry_price = UJUNG WICK C1 (high[C1]), bukan body/level.
+    confirm_ts  = waktu candle kanan terakhir (C7) selesai -- level baru
+                  boleh dipakai SETELAH candle ini closed.
+    c1_ts       = waktu candle C1 -- "tempat" resistance itu sesungguhnya
+                  terbentuk (dipakai buat log/laporan saja).
+    Return list dict: {'level','entry_price','c1_ts','confirm_ts'}."""
     o = df['open'].values; h = df['high'].values; l = df['low'].values; c = df['close'].values
     ts = df['ts'].values
     n = len(df)
-    raw = []
-    for i in range(0, n - 2):
-        if c[i] < o[i] and c[i + 1] > o[i + 1]:
-            S = c[i]
-            if l[i + 2] > S + 1e-9:   # STRICT: low candle3 harus lebih tinggi dari S
-                raw.append({'type': 'support', 'level': S, 'sl': min(l[i], l[i + 1]),
-                            'c1': i, 'c2': i + 1, 'c3': i + 2, 'c1_ts': int(ts[i])})
-        if c[i] > o[i] and c[i + 1] < o[i + 1]:
+    levels = []
+    for i in range(N_LEFT, n - (1 + N_RIGHT)):
+        if c[i] > o[i] and c[i + 1] < o[i + 1]:          # bullish lalu bearish -> resistance
             R = c[i]
-            if h[i + 2] < R - 1e-9:   # STRICT: high candle3 harus lebih rendah dari R
-                raw.append({'type': 'resistance', 'level': R, 'sl': max(h[i], h[i + 1]),
-                            'c1': i, 'c2': i + 1, 'c3': i + 2, 'c1_ts': int(ts[i])})
-    raw.sort(key=lambda e: e['c3'])
-
-    stack = {'support': [], 'resistance': []}
-    events = []
-    for e in raw:
-        ty = e['type']; cutoff = e['c1']
-        alive = []
-        for ref in stack[ty]:
-            broken = False
-            for j in range(ref['c3'] + 1, cutoff + 1):
-                if ty == 'support' and c[j] < ref['sl'] - 1e-12:
-                    broken = True; break
-                if ty == 'resistance' and c[j] > ref['sl'] + 1e-12:
-                    broken = True; break
-            if not broken:
-                alive.append(ref)
-        stack[ty] = alive
-        prev = stack[ty][-1]['level'] if stack[ty] else None
-        wick_extreme = e['sl']; S = e['level']
-        if prev is None:
-            e['valid'] = False
-        elif ty == 'support':
-            e['valid'] = (wick_extreme <= prev + 1e-12) and (prev <= S + 1e-12)
-        else:
-            e['valid'] = (wick_extreme >= prev - 1e-12) and (prev >= S - 1e-12)
-        events.append(e)
-        stack[ty].append({'level': S, 'sl': wick_extreme, 'c3': e['c3']})
-    return events
-
-
-# ============================================================
-# EMA CROSS
-# ============================================================
-
-def compute_ema_cross(df_closed):
-    """Hitung EMA4 & EMA10 dari candle H1 yang sudah closed.
-    Return (death_cross, golden_cross) pada candle TERAKHIR (index -1) dibanding candle -2."""
-    closes = df_closed['close']
-    ema_fast = closes.ewm(span=EMA_FAST, adjust=False).mean().values
-    ema_slow = closes.ewm(span=EMA_SLOW, adjust=False).mean().values
-    if len(ema_fast) < 2:
-        return False, False
-    death_cross  = ema_fast[-2] >= ema_slow[-2] and ema_fast[-1] < ema_slow[-1]
-    golden_cross = ema_fast[-2] <= ema_slow[-2] and ema_fast[-1] > ema_slow[-1]
-    return death_cross, golden_cross
-
-
-def _calc_rsi(C, period):
-    """RSI standar (Wilder smoothing via EWM alpha=1/period). Rumus 100*avg_gain/(avg_gain+avg_loss)
-    dipakai langsung (bukan 100-100/(1+RS)) supaya kasus tepi avg_gain=avg_loss=0 (harga flat
-    berturut-turut) otomatis jadi NaN -- identik dgn implementasi yg sudah divalidasi di backtest_web.py
-    (dicocokkan terhadap pandas_ta sbg referensi independen, hasil 100% identik)."""
-    close = pd.Series(C)
-    delta = close.diff(1)
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-    avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-    rsi = 100 * avg_gain / (avg_gain + avg_loss)
-    return rsi.values
-
-
-def _passes_swing_filter(df_closed, direction):
-    """Gate SWING 3-CANDLE (bukan filter statistik -- kondisi STRUKTURAL). Dicek di candle
-    TEPAT SEBELUM candle penyebab cross (last_i-1 dari df_closed) -- harus swing point asli,
-    bukan cuma pergerakan lanjutan: kiri (last_i-2) tidak boleh lebih ekstrem, kanan (last_i,
-    candle cross itu sendiri) tidak boleh lebih ekstrem juga.
-    direction='Short' (death cross) -> swing HIGH: high candle sebelum-cross harus PALING
-    TINGGI di antara [kiri, tengah, kanan/cross].
-    direction='Long' (golden cross) -> swing LOW: low candle sebelum-cross harus PALING
-    RENDAH di antara [kiri, tengah, kanan/cross].
-    True kalau gate nonaktif ATAU data belum cukup (< 3 candle, fail-open spy tidak diam2
-    menolak semua trade di awal data)."""
-    if not SWING_GATE_ENABLED:
-        return True
-    if len(df_closed) < 3:
-        return True
-    h = df_closed['high'].values; l = df_closed['low'].values
-    last_i = len(df_closed) - 1
-    if direction == 'Short':
-        return h[last_i-1] > h[last_i-2] and h[last_i-1] > h[last_i]
-    else:
-        return l[last_i-1] < l[last_i-2] and l[last_i-1] < l[last_i]
-
-
-def compute_rsi_gate_value(df_closed):
-    """Nilai RSI(RSI_GATE_PERIOD) pada candle TERAKHIR (candle penyebab cross). None kalau
-    data belum cukup atau masih warmup (NaN)."""
-    if len(df_closed) < RSI_GATE_PERIOD + 2:
-        return None
-    rsi = _calc_rsi(df_closed['close'].values, RSI_GATE_PERIOD)
-    v = rsi[-1]
-    return None if np.isnan(v) else float(v)
-
-
-def passes_rsi_gate(df_closed, direction):
-    """Gate RSI TUNGGAL saat EMA cross (bukan filter statistik -- kondisi STRUKTURAL).
-    Rentang penuh [MIN, MAX] terpisah utk Long & Short -- diluar rentang = diblokir.
-    direction: 'Long' butuh RSI_GATE_MIN_LONG <= RSI <= RSI_GATE_MAX_LONG; 'Short' butuh
-    RSI_GATE_MIN_SHORT <= RSI <= RSI_GATE_MAX_SHORT. True kalau gate nonaktif ATAU RSI
-    belum tersedia (msh warmup) -- fail-open spy tidak diam-diam menolak semua trade di
-    awal data krn data kurang."""
-    if not RSI_GATE_ENABLED:
-        return True
-    v = compute_rsi_gate_value(df_closed)
-    if v is None:
-        return True
-    if direction == 'Long':
-        return RSI_GATE_MIN_LONG <= v <= RSI_GATE_MAX_LONG
-    else:
-        return RSI_GATE_MIN_SHORT <= v <= RSI_GATE_MAX_SHORT
+            right_ok = all(h[i + 2 + k] < R - 1e-9 for k in range(N_RIGHT))
+            left_ok = all(h[i - 1 - k] < R - 1e-9 for k in range(N_LEFT))
+            upper_wick_c1 = h[i] - c[i]          # wick atas C1 (bullish): high - close
+            upper_wick_c2 = h[i + 1] - o[i + 1]  # wick atas C2 (bearish): high - open
+            wick_ok = (upper_wick_c1 > WICK_EPS) and (upper_wick_c2 > upper_wick_c1 + WICK_EPS)
+            if right_ok and left_ok and wick_ok:
+                last_right_i = i + 2 + (N_RIGHT - 1)   # index C7
+                levels.append({
+                    'level': R, 'entry_price': h[i],
+                    'c1_ts': int(ts[i]), 'confirm_ts': int(ts[last_right_i]),
+                })
+    levels.sort(key=lambda e: e['confirm_ts'])
+    return levels
 
 
 # ============================================================
@@ -628,7 +492,7 @@ def passes_rsi_gate(df_closed, direction):
 # ============================================================
 
 def place_limit_order(symbol, side, entry_p, sl_p):
-    """Limit order GTC di entry_p (wick candle penyebab cross), SL + trailing native Bybit
+    """Limit order GTC di entry_p (ujung wick c1, level resistance), SL + trailing native Bybit
     langsung terpasang. Trailing aktif setelah profit +TRAIL_ACT_R x dist (rasio 1:TRAIL_ACT_R)."""
     try:
         info    = get_instrument_info(symbol)
@@ -867,168 +731,78 @@ def test_connection():
 
 
 # ============================================================
-# LOGIKA UTAMA per koin: update armed, flip protection, entry via cross
+# LOGIKA UTAMA per koin: deteksi resistance baru -> langsung pasang limit Short
 # ============================================================
 
 def _count_slots():
     return len(active_positions) + len(pending)
 
 
-def update_armed_bias(coin, events):
-    """Support/resistance valid BARU (belum pernah diproses) -> refresh bias arah (armed).
-    Bias ini tidak menyimpan harga level -- cuma penanda 'arah ini sedang punya alasan trading'."""
-    for e in events:
-        seen_key = f"{coin}|{e['type']}"
-        if e['c1_ts'] <= last_seen.get(seen_key, 0):
+def process_resistance_signals(coin, df_closed):
+    """Cek level Resistance baru (confirm_ts > last_seen[coin]) -> LANGSUNG pasang
+    LIMIT SELL (GTC) di ujung wick C1. Tidak ada bias/re-entry/flip -- tiap level
+    resistance yang valid dipakai PERSIS SEKALI: begitu confirm, coba pasang limit
+    (kalau slot penuh, dilewati -- tidak dicoba ulang, sama seperti versi cross
+    sebelumnya)."""
+    key = _akey(coin, 'Short')
+    levels = find_levels(df_closed)
+    newest_seen = last_seen.get(coin, 0)
+
+    for lv in levels:
+        if lv['confirm_ts'] <= newest_seen:
             continue
-        last_seen[seen_key] = e['c1_ts']
-        if not e['valid']:
+        newest_seen = lv['confirm_ts']   # tandai diproses APAPUN hasilnya (tidak diulang lagi)
+
+        if key in pending or key in active_positions:
+            print(f"⏭️  {coin} [Short]: level resistance baru muncul tp sudah ada "
+                  f"pending/posisi Short, skip.")
             continue
-        direction = 'Short' if e['type'] == 'support' else 'Long'
-        key = _akey(coin, direction)
-        is_new = armed.get(key, {}).get('c1_ts') != e['c1_ts']
-        armed[key] = {'c1_ts': e['c1_ts']}
-        if is_new:
-            print(f"🎯 {coin} [{direction}]: {e['type']} VALID baru terdeteksi -> bias {direction} di-refresh.")
 
+        entry = lv['entry_price']
+        dist  = entry * SL_PCT
+        if dist <= 0:
+            continue
+        sl = entry + dist   # Short -> SL di atas entry
 
-def process_flip_and_entry(coin, df_closed, death_cross, golden_cross):
-    """1) FLIP PROTECTION: cross berlawanan -> limit pending SELALU dibatalkan; posisi
-       filled HANYA ditutup kalau close candle cross sudah >= FLIP_MIN_R dari entry.
-       2) Cross SEARAH + armed masih hidup -> pasang/ganti limit di wick candle cross."""
-    h = df_closed['high'].values; l = df_closed['low'].values; c = df_closed['close'].values
-    last_i = len(df_closed) - 1   # index candle H1 yang baru saja closed (penyebab cross)
+        if _count_slots() >= MAX_CONCURRENT:
+            print(f"⏭️  {coin} [Short]: slot penuh ({MAX_CONCURRENT}), level resistance dilewati.")
+            continue
 
-    key_long  = _akey(coin, 'Long')
-    key_short = _akey(coin, 'Short')
+        result = place_limit_order(coin, "Sell", entry, sl)
+        if result is not None:
+            order_id, qty, entry_r, sl_r, dist_r = result
+            pending[key] = {'coin': coin, 'direction': 'Short',
+                             'entry': entry_r, 'sl': sl_r, 'dist': dist_r, 'order_id': order_id}
+            log_entry(f"📉 {coin} [Short]: Resistance valid (c1 @ {lv['c1_ts']}) — "
+                      f"limit SELL @ wick {entry_r:.6g} SL {sl_r:.6g}")
 
-    # ---- 1) FLIP PROTECTION ----
-    # Posisi FILLED: HANYA ditutup kalau CLOSE candle yang menyebabkan cross berlawanan ini
-    # (c[last_i], candle cross itu sendiri -- BUKAN candle setelahnya) sudah >= FLIP_MIN_R
-    # dari entry (dihitung dari entry & dist posisi itu). Dibawah ambang ini (termasuk
-    # floating loss), posisi DIBIARKAN jalan terus -- cuma keluar lewat TRAIL/SL normal.
-    # Limit PENDING TIDAK terpengaruh ambang ini -- tetap dibatalkan seperti biasa.
-    close_at_cross = c[last_i]
-    if death_cross:
-        if key_long in active_positions:
-            p = active_positions[key_long]
-            current_r = (close_at_cross - p['entry']) / p['dist'] if p['dist'] > 0 else 0
-            if current_r >= FLIP_MIN_R - 1e-9:
-                pos = get_open_position(coin, 'Buy')
-                if pos is not None:
-                    close_position(coin, 'Buy', pos.get('size', '0'), reason="flip protection (death cross)")
-                log_entry(f"🔄 {coin} [Long]: FLIP — death cross muncul di {current_r:.2f}R (>= {FLIP_MIN_R}R), "
-                          f"posisi Long ditutup paksa (entry {p.get('entry',0):.6g}).")
-                del active_positions[key_long]
-            else:
-                print(f"🛡️  {coin} [Long]: death cross muncul tp posisi msh {current_r:.2f}R "
-                      f"(< {FLIP_MIN_R}R) — DIBIARKAN jalan, tidak di-flip.")
-        if key_long in pending:
-            p = pending[key_long]
-            cancel_order(coin, p['order_id'])
-            log_entry(f"🔄 {coin} [Long]: FLIP — death cross muncul, limit Long dibatalkan "
-                      f"(belum sempat fill @ {p.get('entry',0):.6g}).")
-            del pending[key_long]
-
-    if golden_cross:
-        if key_short in active_positions:
-            p = active_positions[key_short]
-            current_r = (p['entry'] - close_at_cross) / p['dist'] if p['dist'] > 0 else 0
-            if current_r >= FLIP_MIN_R - 1e-9:
-                pos = get_open_position(coin, 'Sell')
-                if pos is not None:
-                    close_position(coin, 'Sell', pos.get('size', '0'), reason="flip protection (golden cross)")
-                log_entry(f"🔄 {coin} [Short]: FLIP — golden cross muncul di {current_r:.2f}R (>= {FLIP_MIN_R}R), "
-                          f"posisi Short ditutup paksa (entry {p.get('entry',0):.6g}).")
-                del active_positions[key_short]
-            else:
-                print(f"🛡️  {coin} [Short]: golden cross muncul tp posisi msh {current_r:.2f}R "
-                      f"(< {FLIP_MIN_R}R) — DIBIARKAN jalan, tidak di-flip.")
-        if key_short in pending:
-            p = pending[key_short]
-            cancel_order(coin, p['order_id'])
-            log_entry(f"🔄 {coin} [Short]: FLIP — golden cross muncul, limit Short dibatalkan "
-                      f"(belum sempat fill @ {p.get('entry',0):.6g}).")
-            del pending[key_short]
-
-    # ---- 2) CROSS SEARAH -> pasang/ganti limit di wick, TUNDUK ke GATE RSI & GATE SWING (SL = SL_PCT tetap) ----
-    if death_cross and key_short in armed and key_short not in active_positions:
-        if not passes_rsi_gate(df_closed, 'Short'):
-            v = compute_rsi_gate_value(df_closed)
-            print(f"⏭️  {coin} [Short]: sinyal death cross tidak lolos gate RSI{RSI_GATE_PERIOD} "
-                  f"(nilai={v}, butuh [{RSI_GATE_MIN_SHORT}, {RSI_GATE_MAX_SHORT}]), skip.")
-        elif not _passes_swing_filter(df_closed, 'Short'):
-            print(f"⏭️  {coin} [Short]: sinyal death cross tidak lolos gate swing "
-                  f"(candle sebelum-cross bukan swing high), skip.")
-        else:
-            wick = h[last_i]; old_dist = wick * SL_PCT   # SL = SL_PCT dari entry (wick), bukan jarak struktural candle
-            if old_dist > 0:
-                sl = wick + old_dist
-                if key_short in pending:
-                    cancel_order(coin, pending[key_short]['order_id'])
-                    del pending[key_short]
-                if _count_slots() < MAX_CONCURRENT:
-                    result = place_limit_order(coin, "Sell", wick, sl)
-                    if result is not None:
-                        order_id, qty, entry_r, sl_r, dist = result
-                        pending[key_short] = {'coin': coin, 'direction': 'Short',
-                                               'entry': entry_r, 'sl': sl_r, 'dist': dist, 'order_id': order_id}
-                        log_entry(f"📉 {coin} [Short]: Death cross — limit SELL @ wick {entry_r:.6g} SL {sl_r:.6g}")
-                else:
-                    print(f"⏭️  {coin} [Short]: slot penuh ({MAX_CONCURRENT}), skip.")
-
-    if golden_cross and key_long in armed and key_long not in active_positions:
-        if not passes_rsi_gate(df_closed, 'Long'):
-            v = compute_rsi_gate_value(df_closed)
-            print(f"⏭️  {coin} [Long]: sinyal golden cross tidak lolos gate RSI{RSI_GATE_PERIOD} "
-                  f"(nilai={v}, butuh [{RSI_GATE_MIN_LONG}, {RSI_GATE_MAX_LONG}]), skip.")
-        elif not _passes_swing_filter(df_closed, 'Long'):
-            print(f"⏭️  {coin} [Long]: sinyal golden cross tidak lolos gate swing "
-                  f"(candle sebelum-cross bukan swing low), skip.")
-        else:
-            wick = l[last_i]; old_dist = wick * SL_PCT   # SL = SL_PCT dari entry (wick), bukan jarak struktural candle
-            if old_dist > 0:
-                sl = wick - old_dist
-                if key_long in pending:
-                    cancel_order(coin, pending[key_long]['order_id'])
-                    del pending[key_long]
-                if _count_slots() < MAX_CONCURRENT:
-                    result = place_limit_order(coin, "Buy", wick, sl)
-                    if result is not None:
-                        order_id, qty, entry_r, sl_r, dist = result
-                        pending[key_long] = {'coin': coin, 'direction': 'Long',
-                                              'entry': entry_r, 'sl': sl_r, 'dist': dist, 'order_id': order_id}
-                        log_entry(f"📈 {coin} [Long]: Golden cross — limit BUY @ wick {entry_r:.6g} SL {sl_r:.6g}")
-                else:
-                    print(f"⏭️  {coin} [Long]: slot penuh ({MAX_CONCURRENT}), skip.")
+    last_seen[coin] = newest_seen
 
 
 def manage_pending(coin):
-    """Cek tiap pending order utk coin ini: sudah fill? order masih ada di exchange?"""
-    for direction in ('Long', 'Short'):
-        key = _akey(coin, direction)
-        st  = pending.get(key)
-        if st is None:
-            continue
-        side = 'Buy' if direction == 'Long' else 'Sell'
+    """Cek pending order utk coin ini: sudah fill? order masih ada di exchange?"""
+    key = _akey(coin, 'Short')
+    st  = pending.get(key)
+    if st is None:
+        return
 
-        pos = get_open_position(coin, side)
-        if pos is not None:
-            entry_actual = float(pos.get('avgPrice') or st['entry'])
-            dist_actual  = abs(entry_actual - st['sl'])
-            active_positions[key] = {
-                'coin': coin, 'side': side, 'direction': direction,
-                'entry': entry_actual, 'sl': st['sl'], 'dist': dist_actual,
-                'trail_dist': TRAIL_STOP * dist_actual, 'trail_set': False,
-                'peak': entry_actual, 'peak_time': time.time(), 'entry_time': time.time(),
-            }
-            log_entry(f"✅ {coin} [{direction}]: LIMIT FILLED @ {entry_actual:.6g} SL {st['sl']:.6g}")
-            del pending[key]
-            continue
+    pos = get_open_position(coin, 'Sell')
+    if pos is not None:
+        entry_actual = float(pos.get('avgPrice') or st['entry'])
+        dist_actual  = abs(entry_actual - st['sl'])
+        active_positions[key] = {
+            'coin': coin, 'side': 'Sell', 'direction': 'Short',
+            'entry': entry_actual, 'sl': st['sl'], 'dist': dist_actual,
+            'trail_dist': TRAIL_STOP * dist_actual, 'trail_set': False,
+            'peak': entry_actual, 'peak_time': time.time(), 'entry_time': time.time(),
+        }
+        log_entry(f"✅ {coin} [Short]: LIMIT FILLED @ {entry_actual:.6g} SL {st['sl']:.6g}")
+        del pending[key]
+        return
 
-        if not _order_exists(coin, st['order_id']):
-            print(f"⚠️ {coin} [{direction}]: order {st['order_id'][:8]}… tak ditemukan lagi — dibuang dari pending.")
-            del pending[key]
+    if not _order_exists(coin, st['order_id']):
+        print(f"⚠️ {coin} [Short]: order {st['order_id'][:8]}… tak ditemukan lagi — dibuang dari pending.")
+        del pending[key]
 
 
 # ============================================================
@@ -1039,21 +813,11 @@ def run_bot():
     global bot_start_ts
     bot_start_ts = time.time()
     load_state()
-    print("BOT EMA-CROSS REVERSAL + FLIP PROTECTION — H1")
-    print(f"CONFIG | EMA {EMA_FAST}/{EMA_SLOW} | trail aktif 1:{TRAIL_ACT_R:.0f} | trail width {TRAIL_STOP:.1f}x | "
+    print("BOT RESISTANCE MURNI (Short saja) — H1")
+    print(f"CONFIG | trail aktif 1:{TRAIL_ACT_R:.0f} | trail width {TRAIL_STOP:.1f}x | "
           f"risk {RISK_PCT*100:.0f}%/trade | lev {LEVERAGE}x | slot max {MAX_CONCURRENT} | "
-          f"HEDGE {'ON' if ALLOW_HEDGE else 'off'} | SL {SL_PCT*100:.2f}% dari entry")
-    if RSI_GATE_ENABLED:
-        print(f"RSI GATE| RSI{RSI_GATE_PERIOD} AKTIF — Long butuh [{RSI_GATE_MIN_LONG}, {RSI_GATE_MAX_LONG}], "
-              f"Short butuh [{RSI_GATE_MIN_SHORT}, {RSI_GATE_MAX_SHORT}]")
-    else:
-        print("RSI GATE| nonaktif")
-    if SWING_GATE_ENABLED:
-        print("SWING GATE| AKTIF — candle sebelum-cross harus swing point asli (bukan sekadar lanjutan tren)")
-    else:
-        print("SWING GATE| nonaktif")
-    print(f"FLIP    | Posisi filled hanya ditutup jika close candle cross >= {FLIP_MIN_R}R dari entry "
-          f"(dibawah itu dibiarkan jalan). Limit pending tetap dibatalkan tanpa syarat.")
+          f"HEDGE {'ON' if ALLOW_HEDGE else 'off'} | SL {SL_PCT*100:.2f}% dari entry (wick c1) | "
+          f"{len(SYMBOLS)} koin")
     if not test_connection():
         print("⛔ Tidak bisa konek ke Bybit.")
         return
@@ -1070,7 +834,7 @@ def run_bot():
         except Exception as e:
             print(f"⚠️ switch_position_mode error: {e}")
 
-    first_run = (len(last_seen) == 0 and len(last_cross_ts) == 0)
+    first_run = (len(last_seen) == 0)
 
     while True:
         now = time.time()
@@ -1098,31 +862,21 @@ def run_bot():
         for coin in SYMBOLS:
             try:
                 time.sleep(2)
-                df_all = get_data(coin, TIMEFRAME, limit=max(200, EMA_SLOW * 5))
-                if df_all is None or len(df_all) < EMA_SLOW + 5:
+                df_all = get_data(coin, TIMEFRAME, limit=200)
+                if df_all is None or len(df_all) < (N_LEFT + 2 + N_RIGHT + 1):
                     continue
                 df_closed = df_all.iloc[:-1].reset_index(drop=True)   # buang candle yg masih berjalan
-                last_ts = int(df_closed['ts'].iloc[-1])
-
-                events = find_sr_events(df_closed)
 
                 if first_run:
-                    for e in events:
-                        seen_key = f"{coin}|{e['type']}"
-                        if e['c1_ts'] > last_seen.get(seen_key, 0):
-                            last_seen[seen_key] = e['c1_ts']
-                    last_cross_ts[coin] = last_ts
+                    # Inisialisasi run pertama: tandai semua level historis sbg sudah
+                    # diproses TANPA memasang order (hindari banjir entry dari sinyal lama).
+                    levels = find_levels(df_closed)
+                    if levels:
+                        last_seen[coin] = max(lv['confirm_ts'] for lv in levels)
                     continue
 
-                update_armed_bias(coin, events)
                 manage_pending(coin)
-
-                # dedup: cross cuma diproses SEKALI per candle H1 yang baru closed
-                if last_cross_ts.get(coin, 0) < last_ts:
-                    death_cross, golden_cross = compute_ema_cross(df_closed)
-                    if death_cross or golden_cross:
-                        process_flip_and_entry(coin, df_closed, death_cross, golden_cross)
-                    last_cross_ts[coin] = last_ts
+                process_resistance_signals(coin, df_closed)
 
             except Exception as e:
                 print(f"⚠️ Error {coin}: {e}")

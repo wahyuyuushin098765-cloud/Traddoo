@@ -1,33 +1,36 @@
-# EMA-Cross Reversal Bot (Support/Resistance H1 + Flip Protection)
+# Resistance Bot (H1, Short saja)
 
 Bot trading otomatis untuk Bybit Futures (USDT Perpetual), timeframe H1 saja.
-Hasil riset & backtest paling optimal sejauh ini (XRPUSDT 10 bulan H1):
-**Total +249.45R, win rate 42.7%, avg +1.07R/trade.**
+Strategi: **Resistance murni**, hasil riset & backtest `backtest_snr.py`
+(45 koin, 1 tahun H1) — hanya koin dengan ROI% positif yang dipakai.
 
 ⚠️ Backtest ≠ jaminan hasil live. Selalu tes di **Testnet** dulu sebelum live.
 
 ## Cara kerja strategi
 
-1. **Deteksi support/resistance** (basis body candle H1):
-   - Support: candle turun → candle naik → candle ketiga tidak boleh close/wick lebih rendah dari level support.
-   - Resistance: kebalikannya.
-   - Dianggap **valid** kalau wick pembentuknya menyentuh level S/R sejenis sebelumnya yang masih "hidup" (belum pernah ditembus close candle manapun).
+1. **Deteksi Resistance** (basis body candle H1):
+   - C1 bullish (close>open) → C2 bearish (close<open). Level = close[C1].
+   - **KIRI**: 5 candle sebelum C1 — wick (high) tidak boleh melebihi level.
+   - **KANAN**: 5 candle setelah C2 (C3–C7) — wick (high) tidak boleh
+     menyentuh level sama sekali, semua 5 candle harus bersih.
+   - **WICK**: C1 wajib punya wick atas sungguhan (beda dari body), dan
+     wick atas C2 harus **lebih panjang** dari wick C1. Kalau tidak
+     terpenuhi, level gugur.
+   - Strategi **Support sudah dihilangkan** — bot ini hanya entry **Short**.
 
-2. **Arah dibalik** — ini bagian penting:
-   - Support valid → bias **SHORT** (bukan long/fade seperti S/R biasa).
-   - Resistance valid → bias **LONG**.
-   - Bias ini tetap "hidup" dan bisa dipakai berkali-kali (re-entry berulang) sampai muncul support/resistance valid yang benar-benar baru.
+2. **Entry**: begitu candle C7 closed dan semua syarat terpenuhi, bot
+   **langsung** memasang **limit SELL (GTC)** di harga **ujung wick C1**
+   (bukan body/level). SL = `SL_PCT` dari entry (di atas entry, karena
+   Short). Tiap level resistance **hanya dipakai 1x** — tidak ada
+   re-entry, tidak ada bias yang "hidup" menunggu sinyal lain.
 
-3. **Entry via EMA Cross** (EMA4 & EMA10, H1):
-   - Bias Short + **death cross** → limit **SELL** di harga **wick (high)** candle penyebab cross. SL = wick + jarak yang sama ke arah berlawanan.
-   - Bias Long + **golden cross** → limit **BUY** di **wick (low)** candle cross. SL = wick − jarak yang sama.
-   - Cross searah baru sebelum limit lama fill → limit lama diganti ke wick terbaru.
+3. **Trailing stop native Bybit**: aktif otomatis setelah profit mencapai
+   rasio `TRAIL_ACT_R` dari jarak entry–SL, lebar trailing `TRAIL_STOP` ×
+   jarak.
 
-4. **Flip Protection**:
-   - Sedang pending atau sudah punya posisi di satu arah, lalu muncul cross **berlawanan** → limit dibatalkan / posisi ditutup market **saat itu juga**, tidak peduli profit atau rugi.
-   - Bias tetap hidup, lanjut menunggu cross searah berikutnya.
-
-5. **Trailing stop native Bybit**: aktif otomatis setelah profit mencapai rasio **1:6** dari jarak entry-SL (`TRAIL_ACT_R`), lebar trailing 1× jarak (`TRAIL_STOP`).
+Fitur dari versi bot sebelumnya (EMA cross, RSI gate, swing gate, flip
+protection, bias Support→Short/Resistance→Long) **sudah dihapus** karena
+tidak lagi relevan dengan strategi ini.
 
 ## Setup & Deploy (Railway)
 
@@ -43,10 +46,26 @@ Hasil riset & backtest paling optimal sejauh ini (XRPUSDT 10 bulan H1):
 
 ## Environment Variables
 
-Lihat `.env.example` untuk daftar lengkap. Yang **wajib**: `API_KEY`, `API_SECRET`.
-Semua parameter strategi (`TRAIL_ACT_R`, `EMA_FAST`, `EMA_SLOW`, `RISK_PCT`, `LEVERAGE`, `MAX_CONCURRENT`, `ALLOW_HEDGE`) sudah punya default hasil backtest terbaik, tapi bisa dioverride tanpa perlu ubah kode.
+| Var | Default | Keterangan |
+|---|---|---|
+| `API_KEY` / `API_SECRET` | — | **wajib** |
+| `TESTNET` | `false` | `true` untuk testnet |
+| `SL_PCT` | `0.02` | jarak SL dari entry (wick c1) |
+| `TRAIL_ACT_R` | `4.0` | trailing aktif di rasio 1:N dari SL |
+| `TRAIL_STOP` | `1.0` | lebar trailing = N × jarak(entry,SL) |
+| `RISK_PCT` | `0.01` | risk per trade (1% equity) |
+| `LEVERAGE` | `25` | leverage |
+| `MAX_CONCURRENT` | `10` | slot maksimum (posisi + limit pending) |
+| `MIN_DIST_PCT` | `0.002` | floor keamanan SL minimum dari entry |
+| `ALLOW_HEDGE` | `true` | wajib `true` kalau mau Long & Short bareng (saat ini strategi cuma Short) |
 
-⚠️ **Hedge Mode wajib aktif** di akun Bybit kamu (bot otomatis mencoba men-switch saat start) — karena Long dan Short bisa jalan bersamaan di koin yang sama.
+Beberapa var Railway lain yang mungkin masih ada dari setup sebelumnya
+(`EMA_FAST`, `EMA_SLOW`, `RSI_GATE_*`, `SWING_GATE_ENABLED`, `FLIP_MIN_R`,
+`FEE_ENTRY_PCT`, `FEE_EXIT_PCT`, `FILTER_*`, `BACKTEST_DAYS`, `CACHE_DIR`,
+`INITIAL_BALANCE`) **tidak dipakai lagi** oleh bot ini — aman dibiarkan
+atau dihapus dari Railway, tidak akan menyebabkan error.
+
+⚠️ **Hedge Mode** diaktifkan otomatis bot saat start (untuk jaga-jaga kalau nanti ditambah arah Long lagi).
 
 ## Menjalankan lokal (opsional)
 
@@ -59,10 +78,14 @@ python bot_ema_flip.py
 
 ## State & restart
 
-Bot menyimpan progress (bias arah aktif, limit yang terpasang, posisi terbuka, penanda candle yang sudah diproses) ke `bot_state.json`. Kalau Railway redeploy/restart, bot akan lanjut dari state terakhir, bukan mulai dari nol — dan **tidak** akan membanjiri order dari sinyal historis lama (ada mekanisme inisialisasi sekali di run pertama yang menandai histori tanpa entry).
+Bot menyimpan progress (level resistance terakhir yang sudah diproses,
+limit yang terpasang, posisi terbuka) ke `bot_state.json`. Kalau Railway
+redeploy/restart, bot akan lanjut dari state terakhir, bukan mulai dari
+nol — dan **tidak** akan membanjiri order dari sinyal historis lama (ada
+mekanisme inisialisasi sekali di run pertama yang menandai histori tanpa
+entry).
 
 ## Peringatan
 
-- Ini adalah bot agresif (banyak sinyal, win rate menengah, mengandalkan trailing yang lari jauh untuk profit).
 - Selalu mulai dengan `RISK_PCT` kecil dan `MAX_CONCURRENT` terbatas saat pertama kali live.
-- Backtest dilakukan di 1 koin (XRPUSDT) periode 10 bulan — performa bisa berbeda di koin lain / kondisi pasar lain.
+- Backtest dilakukan di 45 koin, 1 tahun H1 — hanya koin dengan ROI% positif yang masuk `SYMBOLS` di kode. Performa live bisa berbeda dari backtest.
