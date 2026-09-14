@@ -354,8 +354,6 @@ SYMBOLS = [
     'PLUMEUSDT',      # +1.7%
     'RENDERUSDT',     # +1.1%
     'CRVUSDT',        # +0.5%
-    'TAOUSDT',        # +0.3%
-    'DOGEUSDT',       # +0.2%
 ]
 
 bot_start_ts      = 0
@@ -813,11 +811,36 @@ def _count_slots():
     return len(active_positions) + len(pending)
 
 
+def _level_still_fresh(df_closed, ev):
+    """True kalau entry_price (ujung wick TEST1) BELUM PERNAH tersentuh oleh
+    candle H1 SETELAH TEST2 confirm (ready_ts) sampai candle terakhir yg
+    closed. False kalau sudah pernah tersentuh -> level basi/gugur (artinya
+    kesempatan retest-nya sudah lewat, entah bot lagi mati atau baru pertama
+    kali deploy). Candle TEST2 sendiri TIDAK dihitung (secara definisi
+    engulfing, TEST2 pasti sudah menyentuh/melewati entry_price -- itu bukan
+    retest, itu breakout-nya)."""
+    ts = df_closed['ts'].values
+    h = df_closed['high'].values; l = df_closed['low'].values
+    n = len(df_closed)
+    idx = int(np.searchsorted(ts, ev['ready_ts']))   # posisi candle TEST2
+    entry = ev['entry_price']
+    for k in range(idx + 1, n):
+        if l[k] <= entry <= h[k]:
+            return False
+    return True
+
+
 def process_new_signals(coin, df_closed):
     """Cek sinyal baru (TEST1+TEST2 lolos, ready_ts > last_seen[coin]) ->
     masukkan ke waiting_signals (BELUM ada order nyata di Bybit). Dedup:
     kalau sudah ada waiting/pending/posisi utk arah yang sama, skip (tiap
-    level dipakai PERSIS SEKALI)."""
+    level dipakai PERSIS SEKALI).
+    FRESHNESS CHECK: kalau entry_price levelnya SUDAH PERNAH tersentuh oleh
+    data historis (candle H1 setelah TEST2 confirm) SEBELUM sinyal ini
+    sempat diproses (mis. bot baru pertama kali deploy, atau abis mati
+    beberapa jam/hari) -> level dianggap GUGUR, TIDAK dimasukkan ke
+    waiting_signals. Ini yang mencegah bot "menghidupkan lagi" level basi
+    dari masa lalu yang seharusnya sudah tidak valid."""
     events = detect_snr_events(df_closed)
     newest_seen = last_seen.get(coin, 0)
 
@@ -833,11 +856,17 @@ def process_new_signals(coin, df_closed):
                   f"menunggu/armed/posisi searah, skip.")
             continue
 
+        if not _level_still_fresh(df_closed, ev):
+            print(f"⏭️  {coin} [{direction}]: {ev['kind']} (TEST2 @ {ev['ready_ts']}) sudah "
+                  f"pernah TERSENTUH data historis sebelum sempat diproses -> GUGUR, dilewati.")
+            continue
+
         waiting_signals[key] = {
             'coin': coin, 'direction': direction, 'entry': ev['entry_price'],
             'kind': ev['kind'], 'level': ev['level'],
         }
-        log_entry(f"👀 {coin} [{direction}]: {ev['kind']} TEST1+TEST2 lolos (c1 @ {ev['c1_ts']}) — "
+        log_entry(f"👀 {coin} [{direction}]: {ev['kind']} TEST1+TEST2 lolos (c1 @ {ev['c1_ts']}), "
+                  f"MASIH FRESH (belum pernah tersentuh) — "
                   f"menunggu harga masuk radius {APPROACH_PCT*100:.1f}% dari wick TEST1 "
                   f"{ev['entry_price']:.6g}")
 
@@ -961,8 +990,6 @@ def run_bot():
         except Exception as e:
             print(f"⚠️ switch_position_mode error: {e}")
 
-    first_run = (len(last_seen) == 0)
-
     while True:
         now = time.time()
         wait_sec = 300 - (now % 300) + 2
@@ -997,14 +1024,10 @@ def run_bot():
                 df_closed = df_all.iloc[:-1].reset_index(drop=True)   # buang candle yg masih berjalan
                 current_price = float(df_all['close'].iloc[-1])       # candle yg lagi berjalan -> proxy harga live
 
-                if first_run:
-                    # Inisialisasi run pertama: tandai semua sinyal historis sbg sudah
-                    # diproses TANPA memasang order (hindari banjir entry dari sinyal lama).
-                    events = detect_snr_events(df_closed)
-                    if events:
-                        last_seen[coin] = max(ev['ready_ts'] for ev in events)
-                    continue
-
+                # Tidak ada lagi perlakuan khusus "run pertama" -- process_new_signals
+                # sendiri sudah otomatis membuang level yang basi (freshness check),
+                # jadi baik pertama kali deploy maupun redeploy, hasilnya sama: hanya
+                # sinyal yang MASIH FRESH (belum pernah tersentuh) yang dipantau.
                 manage_pending(coin)
                 process_armed_distance(coin, current_price)
                 process_waiting_signals(coin, current_price)
@@ -1013,10 +1036,6 @@ def run_bot():
             except Exception as e:
                 print(f"⚠️ Error {coin}: {e}")
                 continue
-
-        if first_run:
-            first_run = False
-            print("✅ Inisialisasi selesai — histori lama ditandai, mulai memantau sinyal BARU mulai sekarang.")
 
         save_state()
 

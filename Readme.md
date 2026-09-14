@@ -2,8 +2,8 @@
 
 Bot trading otomatis untuk Bybit Futures (USDT Perpetual), timeframe H1 saja.
 Strategi: **Support & Resistance + EMA4/10 cross + TEST1/TEST2 (engulfing)**,
-hasil riset & backtest `backtest_snr.py` (45 koin, 1 tahun H1) — hanya koin
-dengan ROI% positif yang dipakai (23 koin).
+hasil riset & backtest `backtest_snr.py` (45 koin, 1 tahun H1) — koin
+dengan ROI% positif (23 koin), dikurangi TAOUSDT & DOGEUSDT (21 koin final).
 
 ⚠️ Backtest ≠ jaminan hasil live. Selalu tes di **Testnet** dulu sebelum live.
 
@@ -99,4 +99,4 @@ yang menandai histori tanpa entry).
 ## Peringatan
 
 - Selalu mulai dengan `RISK_PCT` kecil dan `MAX_CONCURRENT` terbatas saat pertama kali live.
-- Backtest dilakukan di 45 koin, 1 tahun H1 — hanya koin dengan ROI% positif yang masuk `SYMBOLS` di kode (23 koin). Performa live bisa berbeda dari backtest.
+- Backtest dilakukan di 45 koin, 1 tahun H1 — koin dengan ROI% positif yang masuk `SYMBOLS` di kode, dikurangi TAOUSDT & DOGEUSDT (21 koin). Performa live bisa berbeda dari backtest.
