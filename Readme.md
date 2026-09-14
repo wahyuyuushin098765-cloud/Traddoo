@@ -3,7 +3,7 @@
 Bot trading otomatis untuk Bybit Futures (USDT Perpetual), timeframe H1 saja.
 Strategi: **Support & Resistance + EMA4/10 cross + TEST1/TEST2 (engulfing)**,
 hasil riset & backtest `backtest_snr.py` (45 koin, 1 tahun H1) — koin
-dengan ROI% positif (23 koin), dikurangi TAOUSDT & DOGEUSDT (21 koin final).
+dengan Win Rate ≥ 50% yang dipakai (15 koin dari 45 koin yang dites).
 
 ⚠️ Backtest ≠ jaminan hasil live. Selalu tes di **Testnet** dulu sebelum live.
 
@@ -14,9 +14,10 @@ dengan ROI% positif (23 koin), dikurangi TAOUSDT & DOGEUSDT (21 koin final).
      c1 bullish → c2 bearish. Level = close[c1].
    - **KANAN**: 1 candle setelah c1,c2 (c3) — wick-nya tidak boleh menyentuh
      level sama sekali. Tidak ada syarat kiri, tidak ada syarat wick c1/c2.
-   - **EMA CROSS**: candle c2 wajib jadi penyebab cross EMA4/EMA10 (dari
-     close H1) yang searah — Support → GOLDEN CROSS di c2, Resistance →
-     DEATH CROSS di c2. Kalau tidak, level gugur dari awal.
+   - **EMA CROSS**: salah satu dari candle c2, c3, atau c4 wajib jadi
+     penyebab cross EMA4/EMA10 (dari close H1) yang searah — Support →
+     GOLDEN CROSS, Resistance → DEATH CROSS. Kalau tidak ada satupun di
+     c2-c4, level gugur dari awal.
 
 2. **TEST1 + TEST2 (engulfing)**:
    - TEST1: candle pertama setelah c3 yang wick/body-nya menyentuh atau
@@ -99,4 +100,4 @@ yang menandai histori tanpa entry).
 ## Peringatan
 
 - Selalu mulai dengan `RISK_PCT` kecil dan `MAX_CONCURRENT` terbatas saat pertama kali live.
-- Backtest dilakukan di 45 koin, 1 tahun H1 — koin dengan ROI% positif yang masuk `SYMBOLS` di kode, dikurangi TAOUSDT & DOGEUSDT (21 koin). Performa live bisa berbeda dari backtest.
+- Backtest dilakukan di 45 koin, 1 tahun H1 — hanya koin dengan Win Rate ≥ 50% yang masuk `SYMBOLS` di kode (15 koin). Performa live bisa berbeda dari backtest.

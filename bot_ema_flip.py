@@ -12,9 +12,10 @@ RINGKASAN STRATEGI
      Resistance: c1 bullish lalu c2 bearish. Level = close[c1].
    - KANAN: 1 candle setelah c1,c2 (c3) -- wick-nya tidak boleh menyentuh
      level sama sekali. TANPA syarat kiri, TANPA syarat wick c1/c2.
-   - SYARAT EMA CROSS: candle c2 WAJIB jadi penyebab cross EMA4/EMA10
-     (dari close H1) yang searah -- Support -> GOLDEN CROSS di c2,
-     Resistance -> DEATH CROSS di c2. Kalau tidak, level gugur dari awal.
+   - SYARAT EMA CROSS: salah satu dari candle c2, c3, atau c4 WAJIB jadi
+     penyebab cross EMA4/EMA10 (dari close H1) yang searah -- Support ->
+     GOLDEN CROSS, Resistance -> DEATH CROSS. Kalau tidak ada satupun di
+     c2-c4, level gugur dari awal.
 
 2. TEST1 + TEST2 (engulfing), setelah level terbentuk:
    - TEST1: candle pertama SETELAH c3 yang wick/body-nya menyentuh ATAU
@@ -332,28 +333,24 @@ def _akey(coin, direction):
 
 # Hasil backtest Support & Resistance + EMA4/10 cross (1 tahun H1) -- hanya
 # koin dengan ROI% > 0 yang dipakai bot live ini.
+# Hasil backtest Support & Resistance + EMA cross (c2-c4) (1 tahun H1) --
+# hanya koin dengan WIN RATE >= 50% yang dipakai bot live ini.
 SYMBOLS = [
-    'ESPORTSUSDT',    # +43.4%
-    'HBARUSDT',       # +21.3%
-    '1000BONKUSDT',   # +18.7%
-    'USUALUSDT',      # +16.8%
-    'HUSDT',          # +15.9%
-    'ICPUSDT',        # +15.3%
-    'VIRTUALUSDT',    # +13.4%
-    'ORCAUSDT',       # +11.7%
-    'FARTCOINUSDT',   # +11.3%
-    'IMXUSDT',        # +9.3%
-    'XPLUSDT',        # +6.5%
-    'LABUSDT',        # +6.1%
-    'AAVEUSDT',       # +5.9%
-    'HYPEUSDT',       # +3.9%
-    'ALGOUSDT',       # +3.4%
-    'MNTUSDT',        # +3.1%
-    'OPUSDT',         # +2.6%
-    'SUIUSDT',        # +2.5%
-    'PLUMEUSDT',      # +1.7%
-    'RENDERUSDT',     # +1.1%
-    'CRVUSDT',        # +0.5%
+    'FARTCOINUSDT',   # WR 64.4%
+    '1000BONKUSDT',   # WR 59.6%
+    'HUSDT',          # WR 58.9%
+    'USUALUSDT',      # WR 57.6%
+    'IMXUSDT',        # WR 57.1%
+    'VIRTUALUSDT',    # WR 56.6%
+    'ICPUSDT',        # WR 54.7%
+    'LABUSDT',        # WR 54.5%
+    'HBARUSDT',       # WR 53.8%
+    'OPUSDT',         # WR 52.4%
+    'ESPORTSUSDT',    # WR 52.1%
+    'UNIUSDT',        # WR 51.4%
+    'PLUMEUSDT',      # WR 51.4%
+    'CRVUSDT',        # WR 51.4%
+    'BERAUSDT',       # WR 50.9%
 ]
 
 bot_start_ts      = 0
@@ -466,30 +463,38 @@ def find_levels(df):
     TANPA syarat kiri, TANPA syarat wick c1/c2.
     Syarat kanan: N_RIGHT candle setelah c1,c2 (c3) -- wick tidak boleh
                   menyentuh level sama sekali.
-    Syarat EMA CROSS: candle c2 WAJIB jadi penyebab cross EMA_FAST/EMA_SLOW
-                  (dari close H1) yang searah -- Support -> GOLDEN CROSS di
-                  c2, Resistance -> DEATH CROSS di c2. Kalau tidak, level
-                  gugur dari awal.
+    Syarat EMA CROSS di RENTANG c2-c4: cukup SALAH SATU dari candle c2, c3,
+                  ATAU c4 yang menjadi penyebab cross EMA_FAST/EMA_SLOW
+                  (dari close H1) yang searah -- Support -> GOLDEN CROSS,
+                  Resistance -> DEATH CROSS. Kalau tidak ada satupun cross
+                  yang sesuai di c2-c4, level gugur dari awal.
     'patokan' = LEVEL itu sendiri (sama persis dengan 'level').
     Return list dict: {'type','level','patokan','c1','c2','c_right'}."""
     o = df['open'].values; h = df['high'].values; l = df['low'].values; c = df['close'].values
     n = len(df)
     ema_fast = pd.Series(c).ewm(span=EMA_FAST, adjust=False).mean().values
     ema_slow = pd.Series(c).ewm(span=EMA_SLOW, adjust=False).mean().values
+
+    def golden_cross_at(j):   # cross TEPAT di index j (dibanding j-1)
+        return ema_fast[j - 1] <= ema_slow[j - 1] and ema_fast[j] > ema_slow[j]
+
+    def death_cross_at(j):
+        return ema_fast[j - 1] >= ema_slow[j - 1] and ema_fast[j] < ema_slow[j]
+
     levels = []
-    for i in range(0, n - (1 + N_RIGHT)):
-        golden_cross_c2 = ema_fast[i] <= ema_slow[i] and ema_fast[i + 1] > ema_slow[i + 1]
-        death_cross_c2  = ema_fast[i] >= ema_slow[i] and ema_fast[i + 1] < ema_slow[i + 1]
+    for i in range(0, n - 3):   # perlu c1,c2,c3,c4 (i..i+3) semua ada di dalam data
+        golden_cross_c2_c4 = any(golden_cross_at(j) for j in (i + 1, i + 2, i + 3))
+        death_cross_c2_c4  = any(death_cross_at(j) for j in (i + 1, i + 2, i + 3))
         if c[i] < o[i] and c[i + 1] > o[i + 1]:          # bearish lalu bullish -> support
             S = c[i]
             right_ok = all(l[i + 2 + k] > S + 1e-9 for k in range(N_RIGHT))
-            if right_ok and golden_cross_c2:
+            if right_ok and golden_cross_c2_c4:
                 levels.append({'type': 'support', 'level': S, 'patokan': S,
                                 'c1': i, 'c2': i + 1, 'c_right': [i + 2 + k for k in range(N_RIGHT)]})
         if c[i] > o[i] and c[i + 1] < o[i + 1]:          # bullish lalu bearish -> resistance
             R = c[i]
             right_ok = all(h[i + 2 + k] < R - 1e-9 for k in range(N_RIGHT))
-            if right_ok and death_cross_c2:
+            if right_ok and death_cross_c2_c4:
                 levels.append({'type': 'resistance', 'level': R, 'patokan': R,
                                 'c1': i, 'c2': i + 1, 'c_right': [i + 2 + k for k in range(N_RIGHT)]})
     return levels
@@ -969,7 +974,7 @@ def run_bot():
     bot_start_ts = time.time()
     load_state()
     print("BOT SUPPORT & RESISTANCE + EMA CROSS + TEST1/TEST2 ENGULFING — H1")
-    print(f"CONFIG | EMA{EMA_FAST}/{EMA_SLOW} cross wajib di c2 | approach {APPROACH_PCT*100:.1f}% | "
+    print(f"CONFIG | EMA{EMA_FAST}/{EMA_SLOW} cross wajib di c2-c4 | approach {APPROACH_PCT*100:.1f}% | "
           f"trail aktif 1:{TRAIL_ACT_R:.0f} | trail width {TRAIL_STOP:.1f}x | "
           f"risk {RISK_PCT*100:.0f}%/trade | lev {LEVERAGE}x | slot max {MAX_CONCURRENT} | "
           f"HEDGE {'ON' if ALLOW_HEDGE else 'off'} | SL {SL_PCT*100:.2f}% dari entry (wick TEST1) | "
