@@ -69,6 +69,12 @@ def log_entry(text):
         pass
     print(text)
 
+def _fmt_wib(ts_ms):
+    """epoch ms (UTC, dari kline Bybit) -> 'YYYY-MM-DD HH:MM' (WIB, UTC+7)."""
+    import datetime
+    dt = datetime.datetime.fromtimestamp(int(ts_ms) / 1000, tz=datetime.timezone.utc) + datetime.timedelta(hours=7)
+    return dt.strftime('%Y-%m-%d %H:%M')
+
 class _Tee:
     def __init__(self):
         self._out     = sys.__stdout__
@@ -870,10 +876,14 @@ def process_new_signals(coin, df_closed):
             'coin': coin, 'direction': direction, 'entry': ev['entry_price'],
             'kind': ev['kind'], 'level': ev['level'],
         }
+        level_label = 'Support level' if direction == 'Long' else 'Resistance level'
         log_entry(f"👀 {coin} [{direction}]: {ev['kind']} TEST1+TEST2 lolos (c1 @ {ev['c1_ts']}), "
                   f"MASIH FRESH (belum pernah tersentuh) — "
                   f"menunggu harga masuk radius {APPROACH_PCT*100:.1f}% dari wick TEST1 "
-                  f"{ev['entry_price']:.6g}")
+                  f"{ev['entry_price']:.6g}\n"
+                  f"    {level_label}   : {ev['level']:.6g}\n"
+                  f"    C1 terbentuk   : {_fmt_wib(ev['c1_ts'])}\n"
+                  f"    Test1 tersentuh: {_fmt_wib(ev['test1_ts'])}")
 
     last_seen[coin] = newest_seen
 
