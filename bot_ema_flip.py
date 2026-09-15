@@ -318,18 +318,19 @@ TIMEFRAME        = "60"    # H1 saja
 EMA_FAST         = int(os.environ.get('EMA_FAST', 4))
 EMA_SLOW         = int(os.environ.get('EMA_SLOW', 10))
 APPROACH_PCT     = float(os.environ.get('APPROACH_PCT', 0.02))   # limit baru dipasang nyata kalau harga dlm radius 2% dari entry_price
-TRAIL_ACT_R      = float(os.environ.get('TRAIL_ACT_R', 4.0))   # trailing aktif di rasio 1:TRAIL_ACT_R dari SL
+TRAIL_ACT_R      = float(os.environ.get('TRAIL_ACT_R', 3.0))   # trailing aktif di rasio 1:TRAIL_ACT_R dari SL (disamakan dgn backtest TRAIL_ACTIVATE_R)
 TRAIL_STOP       = float(os.environ.get('TRAIL_STOP', 1.0))    # lebar trailing = TRAIL_STOP x jarak(entry,SL)
 TRAIL_TIMEOUT_DAYS = 3      # safety net: force-close kalau peak macet N hari (None = matikan)
 RISK_PCT         = float(os.environ.get('RISK_PCT', 0.01))     # risk per trade = 1% equity
-LEVERAGE         = int(os.environ.get('LEVERAGE', 25))
+LEVERAGE         = int(os.environ.get('LEVERAGE', 50))   # disamakan dgn backtest
 MIN_ORDER_USD    = 5.0
 ORDER_BUMP_FLOOR = 4.0
-MAX_CONCURRENT   = int(os.environ.get('MAX_CONCURRENT', 10))
+MAX_CONCURRENT   = int(os.environ.get('MAX_CONCURRENT', 10))   # sengaja beda dari backtest (unlimited) -- manual override risk management modal live
 MIN_DIST_PCT     = float(os.environ.get('MIN_DIST_PCT', 0.002))   # floor keamanan SL minimum
                              # dari entry (jaga2, seharusnya tidak pernah kepakai krn SL_PCT
                              # default > floor ini)
-SL_PCT           = float(os.environ.get('SL_PCT', 0.02))   # jarak SL dari entry (wick TEST1)
+SL_PCT           = float(os.environ.get('SL_PCT', 0.01))   # jarak SL dari entry (wick TEST1) -- disamakan dgn backtest
+EXPIRE_CANDLES   = 4   # level kadaluarsa kalau limit tak tersentuh dlm N candle H1 setelah TEST2 (disamakan dgn backtest)
 
 ALLOW_HEDGE = os.environ.get('ALLOW_HEDGE', 'true').lower() == 'true'
 def _pidx(side):
@@ -337,26 +338,19 @@ def _pidx(side):
 def _akey(coin, direction):
     return f"{coin}|{direction}" if ALLOW_HEDGE else coin
 
-# Hasil backtest Support & Resistance + EMA4/10 cross (1 tahun H1) -- hanya
-# koin dengan ROI% > 0 yang dipakai bot live ini.
-# Hasil backtest Support & Resistance + EMA cross (c2-c4) (1 tahun H1) --
-# hanya koin dengan WIN RATE >= 50% yang dipakai bot live ini.
+# Disinkronkan dengan SYMBOLS di backtest_web.py (semua koin yang dipakai
+# backtest, bukan cuma subset WR>=50%).
 SYMBOLS = [
-    'FARTCOINUSDT',   # WR 64.4%
-    '1000BONKUSDT',   # WR 59.6%
-    'HUSDT',          # WR 58.9%
-    'USUALUSDT',      # WR 57.6%
-    'IMXUSDT',        # WR 57.1%
-    'VIRTUALUSDT',    # WR 56.6%
-    'ICPUSDT',        # WR 54.7%
-    'LABUSDT',        # WR 54.5%
-    'HBARUSDT',       # WR 53.8%
-    'OPUSDT',         # WR 52.4%
-    'ESPORTSUSDT',    # WR 52.1%
-    'UNIUSDT',        # WR 51.4%
-    'PLUMEUSDT',      # WR 51.4%
-    'CRVUSDT',        # WR 51.4%
-    'BERAUSDT',       # WR 50.9%
+    # Dari Grup A
+    'ESPORTSUSDT', 'HUSDT', 'ACHUSDT', 'LABUSDT', 'USUALUSDT',
+    '1000BONKUSDT', 'FARTCOINUSDT', 'VIRTUALUSDT', 'OPUSDT', 'HBARUSDT',
+    'IMXUSDT', 'BERAUSDT', 'PLUMEUSDT', '1000FLOKIUSDT', 'ICPUSDT',
+    'ADAUSDT', 'APEUSDT', 'CRVUSDT', 'XPLUSDT', 'UNIUSDT',
+
+    # Dari Grup B
+    'PENDLEUSDT', 'IOTAUSDT', 'WUSDT', 'BLURUSDT', 'PYTHUSDT',
+    'ENAUSDT', 'DYDXUSDT', 'MASKUSDT', 'WIFUSDT', 'AEVOUSDT',
+    'ETHFIUSDT', 'JUPUSDT', 'IOSTUSDT'
 ]
 
 bot_start_ts      = 0
@@ -557,6 +551,8 @@ def detect_snr_events(df):
         kind = 'SNR_SUPPORT' if ty == 'support' else 'SNR_RESISTANCE'
         direction = 'Long' if ty == 'support' else 'Short'
         entry_price = float(h[test1_i]) if direction == 'Long' else float(l[test1_i])
+        expire_idx = t2 + EXPIRE_CANDLES
+        expire_ts = int(ts[expire_idx]) if expire_idx < n else None   # None = data H1 belum cukup panjang utk cek expiry
         events.append({
             'kind': kind, 'type': ty, 'level': level, 'patokan': patokan,
             'direction': direction,
@@ -564,6 +560,7 @@ def detect_snr_events(df):
             'test1_ts': int(ts[test1_i]),
             'confirm_ts': int(ts[last_right_i]),
             'c1_ts': int(ts[c1]),
+            'expire_ts': expire_ts,
             'c1': lv['c1'], 'c2': lv['c2'],
         })
 
@@ -874,7 +871,7 @@ def process_new_signals(coin, df_closed):
 
         waiting_signals[key] = {
             'coin': coin, 'direction': direction, 'entry': ev['entry_price'],
-            'kind': ev['kind'], 'level': ev['level'],
+            'kind': ev['kind'], 'level': ev['level'], 'expire_ts': ev.get('expire_ts'),
         }
         level_label = 'Support level' if direction == 'Long' else 'Resistance level'
         log_entry(f"👀 {coin} [{direction}]: {ev['kind']} TEST1+TEST2 lolos (c1 @ {ev['c1_ts']}), "
@@ -888,14 +885,23 @@ def process_new_signals(coin, df_closed):
     last_seen[coin] = newest_seen
 
 
-def process_waiting_signals(coin, current_price):
+def process_waiting_signals(coin, current_price, now_ts=None):
     """Sinyal yg masih menunggu (belum ada order nyata): begitu harga masuk
     radius APPROACH_PCT dari entry_price -> pasang LIMIT order NYATA di
-    Bybit (armed), pindah ke 'pending'."""
+    Bybit (armed), pindah ke 'pending'.
+    KADALUARSA (disamakan dgn backtest): kalau now_ts >= expire_ts
+    (EXPIRE_CANDLES candle H1 setelah TEST2) dan belum sempat armed ->
+    sinyal dibuang permanen, tidak pernah dipasang."""
     for direction in ('Long', 'Short'):
         key = _akey(coin, direction)
         sig = waiting_signals.get(key)
         if sig is None:
+            continue
+        expire_ts = sig.get('expire_ts')
+        if now_ts is not None and expire_ts is not None and now_ts >= expire_ts:
+            log_entry(f"⌛ {coin} [{direction}]: sinyal kadaluarsa ({EXPIRE_CANDLES} candle H1 sejak "
+                      f"TEST2 lewat tanpa masuk radius {APPROACH_PCT*100:.1f}%) — dibuang permanen.")
+            del waiting_signals[key]
             continue
         entry = sig['entry']
         dist_pct = abs(current_price - entry) / entry
@@ -919,20 +925,29 @@ def process_waiting_signals(coin, current_price):
             order_id, qty, entry_r, sl_r, dist_r = result
             pending[key] = {'coin': coin, 'direction': direction,
                              'entry': entry_r, 'sl': sl_r, 'dist': dist_r, 'order_id': order_id,
-                             'kind': sig['kind'], 'level': sig['level']}
+                             'kind': sig['kind'], 'level': sig['level'], 'expire_ts': sig.get('expire_ts')}
             del waiting_signals[key]
             log_entry(f"📌 {coin} [{direction}]: harga masuk radius {APPROACH_PCT*100:.1f}% — "
                       f"LIMIT {side.upper()} dipasang NYATA @ wick {entry_r:.6g} SL {sl_r:.6g}")
 
 
-def process_armed_distance(coin, current_price):
+def process_armed_distance(coin, current_price, now_ts=None):
     """Order yg SUDAH armed (nyata terpasang, blm fill): kalau harga menjauh
     lagi > APPROACH_PCT, BATALKAN order (disarm), balik ke waiting_signals
-    (level tetap hidup, bisa armed lagi kalau mendekat lagi)."""
+    (level tetap hidup, bisa armed lagi kalau mendekat lagi).
+    KADALUARSA (disamakan dgn backtest): kalau now_ts >= expire_ts dan order
+    belum sempat fill -> order dibatalkan permanen (bukan disarm)."""
     for direction in ('Long', 'Short'):
         key = _akey(coin, direction)
         st = pending.get(key)
         if st is None:
+            continue
+        expire_ts = st.get('expire_ts')
+        if now_ts is not None and expire_ts is not None and now_ts >= expire_ts:
+            cancel_order(coin, st['order_id'])
+            del pending[key]
+            log_entry(f"⌛ {coin} [{direction}]: order armed kadaluarsa ({EXPIRE_CANDLES} candle H1 sejak "
+                      f"TEST2 lewat tanpa fill) — dibatalkan permanen.")
             continue
         entry = st['entry']
         dist_pct = abs(current_price - entry) / entry
@@ -941,7 +956,8 @@ def process_armed_distance(coin, current_price):
 
         cancel_order(coin, st['order_id'])
         waiting_signals[key] = {'coin': coin, 'direction': direction, 'entry': entry,
-                                 'kind': st.get('kind', ''), 'level': st.get('level', entry)}
+                                 'kind': st.get('kind', ''), 'level': st.get('level', entry),
+                                 'expire_ts': st.get('expire_ts')}
         del pending[key]
         log_entry(f"🔙 {coin} [{direction}]: harga menjauh lagi (> {APPROACH_PCT*100:.1f}%) sebelum fill — "
                   f"limit dibatalkan, balik menunggu.")
@@ -988,7 +1004,7 @@ def run_bot():
           f"trail aktif 1:{TRAIL_ACT_R:.0f} | trail width {TRAIL_STOP:.1f}x | "
           f"risk {RISK_PCT*100:.0f}%/trade | lev {LEVERAGE}x | slot max {MAX_CONCURRENT} | "
           f"HEDGE {'ON' if ALLOW_HEDGE else 'off'} | SL {SL_PCT*100:.2f}% dari entry (wick TEST1) | "
-          f"{len(SYMBOLS)} koin")
+          f"expire {EXPIRE_CANDLES} candle H1 | {len(SYMBOLS)} koin")
     if not test_connection():
         print("⛔ Tidak bisa konek ke Bybit.")
         return
@@ -1038,14 +1054,15 @@ def run_bot():
                     continue
                 df_closed = df_all.iloc[:-1].reset_index(drop=True)   # buang candle yg masih berjalan
                 current_price = float(df_all['close'].iloc[-1])       # candle yg lagi berjalan -> proxy harga live
+                now_ts = int(df_closed['ts'].iloc[-1]) if len(df_closed) else None   # ts candle H1 terakhir closed, utk cek expire
 
                 # Tidak ada lagi perlakuan khusus "run pertama" -- process_new_signals
                 # sendiri sudah otomatis membuang level yang basi (freshness check),
                 # jadi baik pertama kali deploy maupun redeploy, hasilnya sama: hanya
                 # sinyal yang MASIH FRESH (belum pernah tersentuh) yang dipantau.
                 manage_pending(coin)
-                process_armed_distance(coin, current_price)
-                process_waiting_signals(coin, current_price)
+                process_armed_distance(coin, current_price, now_ts)
+                process_waiting_signals(coin, current_price, now_ts)
                 process_new_signals(coin, df_closed)
 
             except Exception as e:
