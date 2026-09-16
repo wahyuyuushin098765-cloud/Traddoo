@@ -35,7 +35,8 @@ RINGKASAN STRATEGI
    Kalau setelah armed harga menjauh lagi >2% sebelum sempat fill, order
    DIBATALKAN (balik ke menunggu, tetap hidup, bisa armed lagi kalau
    mendekat lagi). Tiap level HANYA dipakai 1x (tidak ada re-entry).
-   SL = SL_PCT dari entry, arah berlawanan.
+   SL = ADAPTIF, di ujung wick candle TEST2 (candle engulfing), floor
+   minimum SL_MIN_PCT dari entry kalau wick-nya sempit.
 
 4. TRAILING STOP native Bybit:
    - Aktif otomatis setelah profit mencapai TRAIL_ACT_R x jarak(entry,SL).
@@ -326,10 +327,12 @@ LEVERAGE         = int(os.environ.get('LEVERAGE', 50))   # disamakan dgn backtes
 MIN_ORDER_USD    = 5.0
 ORDER_BUMP_FLOOR = 4.0
 MAX_CONCURRENT   = int(os.environ.get('MAX_CONCURRENT', 10))   # sengaja beda dari backtest (unlimited) -- manual override risk management modal live
-MIN_DIST_PCT     = float(os.environ.get('MIN_DIST_PCT', 0.002))   # floor keamanan SL minimum
-                             # dari entry (jaga2, seharusnya tidak pernah kepakai krn SL_PCT
-                             # default > floor ini)
-SL_PCT           = float(os.environ.get('SL_PCT', 0.01))   # jarak SL dari entry (wick TEST1) -- disamakan dgn backtest
+MIN_DIST_PCT     = float(os.environ.get('MIN_DIST_PCT', 0.003))   # floor keamanan SL minimum dari entry
+                             # -- disamakan dgn SL_MIN_PCT backtest (0.3%), dipakai
+                             # place_limit_order sbg pengaman terakhir kalau somehow
+                             # dist yg terkirim masih < floor ini
+SL_MIN_PCT       = float(os.environ.get('SL_MIN_PCT', 0.003))   # SL ADAPTIF: dipasang di wick candle TEST2 (engulfing),
+                             # floor minimum 0.3% dari entry (disamakan dgn backtest)
 EXPIRE_CANDLES   = 4   # level kadaluarsa kalau limit tak tersentuh dlm N candle H1 setelah TEST2 (disamakan dgn backtest)
 
 ALLOW_HEDGE = os.environ.get('ALLOW_HEDGE', 'true').lower() == 'true'
@@ -341,16 +344,11 @@ def _akey(coin, direction):
 # Disinkronkan dengan SYMBOLS di backtest_web.py (semua koin yang dipakai
 # backtest, bukan cuma subset WR>=50%).
 SYMBOLS = [
-    # Dari Grup A
-    'ESPORTSUSDT', 'HUSDT', 'ACHUSDT', 'LABUSDT', 'USUALUSDT',
-    '1000BONKUSDT', 'FARTCOINUSDT', 'VIRTUALUSDT', 'OPUSDT', 'HBARUSDT',
-    'IMXUSDT', 'BERAUSDT', 'PLUMEUSDT', '1000FLOKIUSDT', 'ICPUSDT',
-    'ADAUSDT', 'APEUSDT', 'CRVUSDT', 'XPLUSDT', 'UNIUSDT',
-
-    # Dari Grup B
-    'PENDLEUSDT', 'IOTAUSDT', 'WUSDT', 'BLURUSDT', 'PYTHUSDT',
-    'ENAUSDT', 'DYDXUSDT', 'MASKUSDT', 'WIFUSDT', 'AEVOUSDT',
-    'ETHFIUSDT', 'JUPUSDT', 'IOSTUSDT'
+    'PENDLEUSDT', 'PYTHUSDT', 'ESPORTSUSDT', 'WIFUSDT', 'WUSDT',
+    '1000BONKUSDT', 'ETHFIUSDT', 'FARTCOINUSDT', 'CRVUSDT', 'USUALUSDT',
+    '1000FLOKIUSDT', 'BLURUSDT', 'PLUMEUSDT', 'ACHUSDT', 'IMXUSDT',
+    'BERAUSDT', 'ENAUSDT', 'HBARUSDT', 'OPUSDT', 'VIRTUALUSDT',
+    'AEVOUSDT'
 ]
 
 bot_start_ts      = 0
@@ -507,12 +505,18 @@ def detect_snr_events(df):
            melebihi patokan (level itu sendiri). Tidak ada syarat arah candle.
     TEST2: candle TEPAT SETELAH TEST1, harus ENGULFING (Support: ujung body
            TEST2 > high candle TEST1. Resistance: ujung body TEST2 < low
-           candle TEST1). Kalau gagal -> level gugur (dicoba sekali saja).
+           candle TEST1) DAN body candle TEST2 (|close-open|) harus lebih
+           BESAR (ukuran, wick tidak dihitung) daripada body candle TEST1.
+           Kalau salah satu gagal -> level gugur (dicoba sekali saja).
     entry_price = ujung wick candle TEST1 (Long->high, Short->low).
+    sl_price = ADAPTIF, di ujung wick candle TEST2 (Long->low, Short->high),
+               dengan floor minimum SL_MIN_PCT dari entry (kalau wick TEST2
+               lebih sempit dari itu, diperbesar jadi SL_MIN_PCT).
     ready_ts = waktu (ts) candle TEST2 -- sinyal baru boleh diproses SETELAH
                candle ini closed.
     Return list dict: {'kind','type','level','patokan','direction',
-    'entry_price','ready_ts','test1_ts','confirm_ts','c1_ts','c1','c2'}."""
+    'entry_price','sl_price','ready_ts','test1_ts','confirm_ts','c1_ts',
+    'expire_ts','c1','c2'}."""
     o = df['open'].values; h = df['high'].values; l = df['low'].values; c = df['close'].values
     ts = df['ts'].values
     n = len(df)
@@ -548,15 +552,31 @@ def detect_snr_events(df):
         if not engulf_ok:
             continue
 
+        # Syarat tambahan: body candle TEST2 harus lebih besar (ukuran, wick
+        # tidak dihitung) daripada body candle TEST1.
+        body_size_t1 = abs(c[test1_i] - o[test1_i])
+        body_size_t2 = abs(c[t2] - o[t2])
+        if not (body_size_t2 > body_size_t1 + WICK_EPS):
+            continue
+
         kind = 'SNR_SUPPORT' if ty == 'support' else 'SNR_RESISTANCE'
         direction = 'Long' if ty == 'support' else 'Short'
         entry_price = float(h[test1_i]) if direction == 'Long' else float(l[test1_i])
+        # SL ADAPTIF: ujung wick candle TEST2, dengan floor SL_MIN_PCT.
+        if direction == 'Long':
+            sl_raw = float(l[t2])
+            min_sl_dist = entry_price * SL_MIN_PCT
+            sl_price = min(sl_raw, entry_price - min_sl_dist)
+        else:
+            sl_raw = float(h[t2])
+            min_sl_dist = entry_price * SL_MIN_PCT
+            sl_price = max(sl_raw, entry_price + min_sl_dist)
         expire_idx = t2 + EXPIRE_CANDLES
         expire_ts = int(ts[expire_idx]) if expire_idx < n else None   # None = data H1 belum cukup panjang utk cek expiry
         events.append({
             'kind': kind, 'type': ty, 'level': level, 'patokan': patokan,
             'direction': direction,
-            'entry_price': entry_price, 'ready_ts': int(ts[t2]),
+            'entry_price': entry_price, 'sl_price': sl_price, 'ready_ts': int(ts[t2]),
             'test1_ts': int(ts[test1_i]),
             'confirm_ts': int(ts[last_right_i]),
             'c1_ts': int(ts[c1]),
@@ -871,7 +891,8 @@ def process_new_signals(coin, df_closed):
 
         waiting_signals[key] = {
             'coin': coin, 'direction': direction, 'entry': ev['entry_price'],
-            'kind': ev['kind'], 'level': ev['level'], 'expire_ts': ev.get('expire_ts'),
+            'sl': ev['sl_price'], 'kind': ev['kind'], 'level': ev['level'],
+            'expire_ts': ev.get('expire_ts'),
         }
         level_label = 'Support level' if direction == 'Long' else 'Resistance level'
         log_entry(f"👀 {coin} [{direction}]: {ev['kind']} TEST1+TEST2 lolos (c1 @ {ev['c1_ts']}), "
@@ -908,11 +929,11 @@ def process_waiting_signals(coin, current_price, now_ts=None):
         if dist_pct > APPROACH_PCT:
             continue   # masih jauh, tetap menunggu
 
-        dist = entry * SL_PCT
+        sl = sig['sl']   # SL ADAPTIF (wick candle TEST2, floor SL_MIN_PCT) -- sudah dihitung saat deteksi event
+        dist = abs(entry - sl)
         if dist <= 0:
             del waiting_signals[key]
             continue
-        sl = (entry - dist) if direction == 'Long' else (entry + dist)
 
         if _count_slots() >= MAX_CONCURRENT:
             print(f"⏭️  {coin} [{direction}]: harga sudah dekat tp slot penuh ({MAX_CONCURRENT}), "
@@ -956,8 +977,8 @@ def process_armed_distance(coin, current_price, now_ts=None):
 
         cancel_order(coin, st['order_id'])
         waiting_signals[key] = {'coin': coin, 'direction': direction, 'entry': entry,
-                                 'kind': st.get('kind', ''), 'level': st.get('level', entry),
-                                 'expire_ts': st.get('expire_ts')}
+                                 'sl': st.get('sl'), 'kind': st.get('kind', ''),
+                                 'level': st.get('level', entry), 'expire_ts': st.get('expire_ts')}
         del pending[key]
         log_entry(f"🔙 {coin} [{direction}]: harga menjauh lagi (> {APPROACH_PCT*100:.1f}%) sebelum fill — "
                   f"limit dibatalkan, balik menunggu.")
@@ -1003,7 +1024,7 @@ def run_bot():
     print(f"CONFIG | EMA{EMA_FAST}/{EMA_SLOW} cross wajib di c2-c4 | approach {APPROACH_PCT*100:.1f}% | "
           f"trail aktif 1:{TRAIL_ACT_R:.0f} | trail width {TRAIL_STOP:.1f}x | "
           f"risk {RISK_PCT*100:.0f}%/trade | lev {LEVERAGE}x | slot max {MAX_CONCURRENT} | "
-          f"HEDGE {'ON' if ALLOW_HEDGE else 'off'} | SL {SL_PCT*100:.2f}% dari entry (wick TEST1) | "
+          f"HEDGE {'ON' if ALLOW_HEDGE else 'off'} | SL adaptif wick TEST2, min {SL_MIN_PCT*100:.2f}% dari entry | "
           f"expire {EXPIRE_CANDLES} candle H1 | {len(SYMBOLS)} koin")
     if not test_connection():
         print("⛔ Tidak bisa konek ke Bybit.")
