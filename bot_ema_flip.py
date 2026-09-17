@@ -389,6 +389,20 @@ def load_state():
         pending           = data.get("pending", {})
         active_positions  = data.get("active_positions", {})
         last_seen         = data.get("last_seen", {})
+        # MIGRASI: sinyal lama (tersimpan sebelum expire_ts dihitung dari
+        # waktu) mungkin punya expire_ts None/hilang -- kalau dibiarkan,
+        # sinyal itu TIDAK PERNAH expire selamanya (lihat detect_snr_events).
+        # Paksa expire_ts = 0 supaya langsung ke-expire di scan pertama
+        # setelah restart, bukan nyangkut permanen.
+        fixed = 0
+        for d in (waiting_signals, pending):
+            for st in d.values():
+                if st.get('expire_ts') is None:
+                    st['expire_ts'] = 0
+                    fixed += 1
+        if fixed:
+            print(f"🔧 Migrasi state: {fixed} sinyal lama expire_ts kosong -> "
+                  f"dipaksa expire di scan berikutnya.")
         print(f"✅ State dimuat: {len(waiting_signals)} menunggu, {len(pending)} armed/pending, "
               f"{len(active_positions)} posisi aktif.")
     except Exception as e:
@@ -571,8 +585,15 @@ def detect_snr_events(df):
             sl_raw = float(h[t2])
             min_sl_dist = entry_price * SL_MIN_PCT
             sl_price = max(sl_raw, entry_price + min_sl_dist)
-        expire_idx = t2 + EXPIRE_CANDLES
-        expire_ts = int(ts[expire_idx]) if expire_idx < n else None   # None = data H1 belum cukup panjang utk cek expiry
+        # expire_ts dihitung dari WAKTU (ts candle TEST2 + EXPIRE_CANDLES jam
+        # H1 dalam ms), BUKAN dari index array data yang di-fetch. Kalau
+        # dihitung dari index (ts[t2+N]), saat TEST2 muncul di ujung data yg
+        # baru di-fetch (candle ke-N setelahnya belum ada di array), hasilnya
+        # None -> sinyal jadi TIDAK PERNAH expire selamanya walau kenyataannya
+        # candle H1 tsb sudah lewat di waktu nyata. Dgn dihitung dari waktu,
+        # expire_ts selalu pasti ada sejak awal, tidak bergantung panjang data.
+        H1_MS = 3600 * 1000
+        expire_ts = int(ts[t2]) + EXPIRE_CANDLES * H1_MS
         events.append({
             'kind': kind, 'type': ty, 'level': level, 'patokan': patokan,
             'direction': direction,
