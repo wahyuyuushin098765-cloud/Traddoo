@@ -334,6 +334,7 @@ MIN_DIST_PCT     = float(os.environ.get('MIN_DIST_PCT', 0.01))   # floor keamana
 SL_MIN_PCT       = float(os.environ.get('SL_MIN_PCT', 0.01))   # SL ADAPTIF: dipasang di wick candle TEST2 (engulfing),
                              # floor minimum 1% dari entry (BEDA dari backtest yg 0.3%)
 EXPIRE_CANDLES   = 4   # level kadaluarsa kalau limit tak tersentuh dlm N candle H1 setelah TEST2 (disamakan dgn backtest)
+ENABLE_TEST3     = os.environ.get('ENABLE_TEST3', 'true').lower() == 'true'   # AKTIF (default, disamakan dgn backtest): entry pindah ke wick TEST3 kalau TEST1 blm fill 1 candle H1 setelah TEST2
 
 ALLOW_HEDGE = os.environ.get('ALLOW_HEDGE', 'true').lower() == 'true'
 def _pidx(side):
@@ -348,7 +349,11 @@ SYMBOLS = [
     'USUALUSDT', 'ETHFIUSDT', 'LABUSDT', 'IOTAUSDT', '1000FLOKIUSDT',
     'HBARUSDT', 'PLUMEUSDT', 'BERAUSDT', 'MASKUSDT', 'ESPORTSUSDT',
     'IMXUSDT', 'CRVUSDT', 'ACHUSDT', 'FARTCOINUSDT', 'AEVOUSDT',
-    'ICPUSDT', 'ENAUSDT', 'ADAUSDT', 'WIFUSDT', 'DYDXUSDT'
+    'ICPUSDT', 'ENAUSDT', 'ADAUSDT', 'WIFUSDT', 'DYDXUSDT',
+    'BATUSDT', 'LRCUSDT', 'IOUSDT', 'BOMEUSDT', 'OPUSDT',
+    'POPCATUSDT', 'WOOUSDT', 'STORJUSDT', 'ROSEUSDT', 'POWRUSDT',
+    'JUPUSDT', 'HUSDT', 'STRKUSDT', 'IOTXUSDT', 'MEWUSDT',
+    'VIRTUALUSDT', 'POLUSDT', 'CKBUSDT', 'ASTRUSDT'
 ]
 
 bot_start_ts      = 0
@@ -576,6 +581,19 @@ def detect_snr_events(df):
         kind = 'SNR_SUPPORT' if ty == 'support' else 'SNR_RESISTANCE'
         direction = 'Long' if ty == 'support' else 'Short'
         entry_price = float(h[test1_i]) if direction == 'Long' else float(l[test1_i])
+        # TEST3 (entry cadangan): kalau limit TEST1 belum fill sampai 1
+        # candle H1 setelah TEST2 closed, entry dipindah ke ujung wick
+        # candle TEST3 (Long->low, Short->high -- kebalikan arah TEST1).
+        # Kalau data belum sampai candle TEST3 (ujung histori yg di-fetch),
+        # TEST3 belum bisa ditentukan -> entry tetap di TEST1 (dicek ulang
+        # scan berikutnya begitu candle TEST3 sudah closed & ke-fetch).
+        t3 = t2 + 1
+        if t3 < n:
+            entry_price_t3 = float(l[t3]) if direction == 'Long' else float(h[t3])
+            test3_ts = int(ts[t3])
+        else:
+            entry_price_t3 = None
+            test3_ts = None
         # SL ADAPTIF: ujung wick candle TEST2, dengan floor SL_MIN_PCT.
         if direction == 'Long':
             sl_raw = float(l[t2])
@@ -592,12 +610,15 @@ def detect_snr_events(df):
         # None -> sinyal jadi TIDAK PERNAH expire selamanya walau kenyataannya
         # candle H1 tsb sudah lewat di waktu nyata. Dgn dihitung dari waktu,
         # expire_ts selalu pasti ada sejak awal, tidak bergantung panjang data.
+        # Catatan: begitu entry pindah ke TEST3, expire_ts DIHITUNG ULANG
+        # dari test3_ts (bukan dari sini lagi) -- lihat process_waiting_signals.
         H1_MS = 3600 * 1000
         expire_ts = int(ts[t2]) + EXPIRE_CANDLES * H1_MS
         events.append({
             'kind': kind, 'type': ty, 'level': level, 'patokan': patokan,
             'direction': direction,
             'entry_price': entry_price, 'sl_price': sl_price, 'ready_ts': int(ts[t2]),
+            'entry_price_t3': entry_price_t3, 'test3_ts': test3_ts,
             'test1_ts': int(ts[test1_i]),
             'confirm_ts': int(ts[last_right_i]),
             'c1_ts': int(ts[c1]),
@@ -914,6 +935,8 @@ def process_new_signals(coin, df_closed):
             'coin': coin, 'direction': direction, 'entry': ev['entry_price'],
             'sl': ev['sl_price'], 'kind': ev['kind'], 'level': ev['level'],
             'expire_ts': ev.get('expire_ts'),
+            'entry_price_t3': ev.get('entry_price_t3'), 'test3_ts': ev.get('test3_ts'),
+            'used_t3': False,
         }
         level_label = 'Support level' if direction == 'Long' else 'Resistance level'
         log_entry(f"👀 {coin} [{direction}]: {ev['kind']} TEST1+TEST2 lolos (c1 @ {ev['c1_ts']}), "
@@ -927,22 +950,52 @@ def process_new_signals(coin, df_closed):
     last_seen[coin] = newest_seen
 
 
+def _maybe_switch_to_test3(coin, direction, sig, now_ts):
+    """Cek & lakukan switch entry TEST1 -> TEST3 (disamakan dgn backtest):
+    kalau ENABLE_TEST3 aktif, belum pernah di-switch, data TEST3 tersedia,
+    dan now_ts sudah lewat test3_ts (1 candle H1 setelah TEST2 closed) ->
+    entry dipindah ke wick TEST3 (Long->low, Short->high). Guard: kalau
+    entry TEST3 ada di sisi SALAH dari SL (mis. Long tapi entry<=SL), TEST3
+    dianggap tidak valid, tetap pakai TEST1. Return True kalau switch terjadi
+    (sig dimodifikasi in-place)."""
+    if not ENABLE_TEST3 or sig.get('used_t3') or now_ts is None:
+        return False
+    t3_price = sig.get('entry_price_t3')
+    t3_ts = sig.get('test3_ts')
+    if t3_price is None or t3_ts is None or now_ts < t3_ts:
+        return False
+    sig['used_t3'] = True
+    sl = sig['sl']
+    t3_valid = (t3_price > sl) if direction == 'Long' else (t3_price < sl)
+    if not t3_valid:
+        return False   # TEST3 tidak valid (nembus SL) -> tetap TEST1
+    sig['entry'] = t3_price
+    sig['expire_ts'] = t3_ts + EXPIRE_CANDLES * 3600 * 1000
+    log_entry(f"🔀 {coin} [{direction}]: TEST1 belum fill 1 candle H1 setelah TEST2 — "
+              f"entry dipindah ke wick TEST3 {t3_price:.6g} (expire dihitung ulang).")
+    return True
+
+
 def process_waiting_signals(coin, current_price, now_ts=None):
     """Sinyal yg masih menunggu (belum ada order nyata): begitu harga masuk
     radius APPROACH_PCT dari entry_price -> pasang LIMIT order NYATA di
     Bybit (armed), pindah ke 'pending'.
+    TEST3: kalau TEST1 blm fill 1 candle H1 setelah TEST2, entry dipindah
+    ke wick TEST3 (lihat _maybe_switch_to_test3).
     KADALUARSA (disamakan dgn backtest): kalau now_ts >= expire_ts
-    (EXPIRE_CANDLES candle H1 setelah TEST2) dan belum sempat armed ->
-    sinyal dibuang permanen, tidak pernah dipasang."""
+    (EXPIRE_CANDLES candle H1 setelah TEST2, atau setelah TEST3 kalau sudah
+    di-switch) dan belum sempat armed -> sinyal dibuang permanen, tidak
+    pernah dipasang."""
     for direction in ('Long', 'Short'):
         key = _akey(coin, direction)
         sig = waiting_signals.get(key)
         if sig is None:
             continue
+        _maybe_switch_to_test3(coin, direction, sig, now_ts)
         expire_ts = sig.get('expire_ts')
         if now_ts is not None and expire_ts is not None and now_ts >= expire_ts:
             log_entry(f"⌛ {coin} [{direction}]: sinyal kadaluarsa ({EXPIRE_CANDLES} candle H1 sejak "
-                      f"TEST2 lewat tanpa masuk radius {APPROACH_PCT*100:.1f}%) — dibuang permanen.")
+                      f"TEST2/TEST3 lewat tanpa masuk radius {APPROACH_PCT*100:.1f}%) — dibuang permanen.")
             del waiting_signals[key]
             continue
         entry = sig['entry']
@@ -967,7 +1020,9 @@ def process_waiting_signals(coin, current_price, now_ts=None):
             order_id, qty, entry_r, sl_r, dist_r = result
             pending[key] = {'coin': coin, 'direction': direction,
                              'entry': entry_r, 'sl': sl_r, 'dist': dist_r, 'order_id': order_id,
-                             'kind': sig['kind'], 'level': sig['level'], 'expire_ts': sig.get('expire_ts')}
+                             'kind': sig['kind'], 'level': sig['level'], 'expire_ts': sig.get('expire_ts'),
+                             'entry_price_t3': sig.get('entry_price_t3'), 'test3_ts': sig.get('test3_ts'),
+                             'used_t3': sig.get('used_t3', False)}
             del waiting_signals[key]
             log_entry(f"📌 {coin} [{direction}]: harga masuk radius {APPROACH_PCT*100:.1f}% — "
                       f"LIMIT {side.upper()} dipasang NYATA @ wick {entry_r:.6g} SL {sl_r:.6g}")
@@ -977,6 +1032,9 @@ def process_armed_distance(coin, current_price, now_ts=None):
     """Order yg SUDAH armed (nyata terpasang, blm fill): kalau harga menjauh
     lagi > APPROACH_PCT, BATALKAN order (disarm), balik ke waiting_signals
     (level tetap hidup, bisa armed lagi kalau mendekat lagi).
+    TEST3: kalau TEST1 blm fill 1 candle H1 setelah TEST2, order LAMA (di
+    harga TEST1) dibatalkan, entry dipindah ke wick TEST3, balik ke
+    waiting_signals (perlu di-armed ulang dari entry baru).
     KADALUARSA (disamakan dgn backtest): kalau now_ts >= expire_ts dan order
     belum sempat fill -> order dibatalkan permanen (bukan disarm)."""
     for direction in ('Long', 'Short'):
@@ -984,12 +1042,26 @@ def process_armed_distance(coin, current_price, now_ts=None):
         st = pending.get(key)
         if st is None:
             continue
+
+        switched = _maybe_switch_to_test3(coin, direction, st, now_ts)
+        if switched:
+            cancel_order(coin, st['order_id'])
+            waiting_signals[key] = {'coin': coin, 'direction': direction, 'entry': st['entry'],
+                                     'sl': st.get('sl'), 'kind': st.get('kind', ''),
+                                     'level': st.get('level', st['entry']), 'expire_ts': st.get('expire_ts'),
+                                     'entry_price_t3': st.get('entry_price_t3'), 'test3_ts': st.get('test3_ts'),
+                                     'used_t3': st.get('used_t3', False)}
+            del pending[key]
+            log_entry(f"🔀 {coin} [{direction}]: order lama (wick TEST1) dibatalkan krn beralih ke TEST3, "
+                      f"balik menunggu dari entry baru.")
+            continue
+
         expire_ts = st.get('expire_ts')
         if now_ts is not None and expire_ts is not None and now_ts >= expire_ts:
             cancel_order(coin, st['order_id'])
             del pending[key]
             log_entry(f"⌛ {coin} [{direction}]: order armed kadaluarsa ({EXPIRE_CANDLES} candle H1 sejak "
-                      f"TEST2 lewat tanpa fill) — dibatalkan permanen.")
+                      f"TEST2/TEST3 lewat tanpa fill) — dibatalkan permanen.")
             continue
         entry = st['entry']
         dist_pct = abs(current_price - entry) / entry
@@ -999,7 +1071,9 @@ def process_armed_distance(coin, current_price, now_ts=None):
         cancel_order(coin, st['order_id'])
         waiting_signals[key] = {'coin': coin, 'direction': direction, 'entry': entry,
                                  'sl': st.get('sl'), 'kind': st.get('kind', ''),
-                                 'level': st.get('level', entry), 'expire_ts': st.get('expire_ts')}
+                                 'level': st.get('level', entry), 'expire_ts': st.get('expire_ts'),
+                                 'entry_price_t3': st.get('entry_price_t3'), 'test3_ts': st.get('test3_ts'),
+                                 'used_t3': st.get('used_t3', False)}
         del pending[key]
         log_entry(f"🔙 {coin} [{direction}]: harga menjauh lagi (> {APPROACH_PCT*100:.1f}%) sebelum fill — "
                   f"limit dibatalkan, balik menunggu.")
@@ -1046,7 +1120,7 @@ def run_bot():
           f"trail aktif 1:{TRAIL_ACT_R:.0f} | trail width {TRAIL_STOP:.1f}x | "
           f"risk {RISK_PCT*100:.0f}%/trade | lev {LEVERAGE}x | slot max {MAX_CONCURRENT} | "
           f"HEDGE {'ON' if ALLOW_HEDGE else 'off'} | SL adaptif wick TEST2, min {SL_MIN_PCT*100:.2f}% dari entry | "
-          f"expire {EXPIRE_CANDLES} candle H1 | {len(SYMBOLS)} koin")
+          f"expire {EXPIRE_CANDLES} candle H1 | TEST3 {'AKTIF' if ENABLE_TEST3 else 'nonaktif'} | {len(SYMBOLS)} koin")
     if not test_connection():
         print("⛔ Tidak bisa konek ke Bybit.")
         return
