@@ -881,36 +881,59 @@ def _count_slots():
     return len(active_positions) + len(pending)
 
 
-def _level_still_fresh(df_closed, ev):
-    """True kalau entry_price (ujung wick TEST1) BELUM PERNAH tersentuh oleh
-    candle H1 SETELAH TEST2 confirm (ready_ts) sampai candle terakhir yg
-    closed. False kalau sudah pernah tersentuh -> level basi/gugur (artinya
-    kesempatan retest-nya sudah lewat, entah bot lagi mati atau baru pertama
-    kali deploy). Candle TEST2 sendiri TIDAK dihitung (secara definisi
-    engulfing, TEST2 pasti sudah menyentuh/melewati entry_price -- itu bukan
-    retest, itu breakout-nya)."""
+def _touched_since(df_closed, ready_ts, entry):
+    """True kalau ada candle H1 SETELAH ready_ts (exclusive) sampai candle
+    terakhir closed yang menyentuh harga entry (l<=entry<=h)."""
     ts = df_closed['ts'].values
     h = df_closed['high'].values; l = df_closed['low'].values
     n = len(df_closed)
-    idx = int(np.searchsorted(ts, ev['ready_ts']))   # posisi candle TEST2
-    entry = ev['entry_price']
+    idx = int(np.searchsorted(ts, ready_ts))   # posisi candle ready_ts (TEST2 atau TEST3)
     for k in range(idx + 1, n):
         if l[k] <= entry <= h[k]:
-            return False
-    return True
+            return True
+    return False
 
 
-def process_new_signals(coin, df_closed):
+def _resolve_fresh_entry(df_closed, ev, now_ts):
+    """Tentukan entry mana yang berlaku & apakah levelnya masih FRESH, sadar
+    TEST3 (disamakan dgn keputusan switch di _maybe_switch_to_test3):
+    - Kalau now_ts BELUM lewat test3_ts (atau TEST3 tdk tersedia/tdk valid):
+      entry = TEST1, fresh = belum pernah tersentuh sejak TEST2 (candle
+      TEST2 sendiri tidak dihitung -- itu breakout, bukan retest).
+    - Kalau now_ts SUDAH lewat test3_ts dan TEST3 valid (tdk nembus SL):
+      entry LANGSUNG dianggap TEST3 (used_t3=True sejak awal, sesuai TEST1
+      dianggap "sudah kadaluarsa 1 candle" begitu level ini pertama kali
+      dilihat bot). fresh = belum pernah tersentuh sejak TEST3 (candle
+      TEST3 sendiri tidak dihitung).
+    Return (entry_price, is_fresh, used_t3)."""
+    t3_price = ev.get('entry_price_t3')
+    t3_ts = ev.get('test3_ts')
+    sl = ev['sl_price']
+    t3_available = (t3_price is not None and t3_ts is not None
+                     and now_ts is not None and now_ts >= t3_ts)
+    if t3_available:
+        t3_valid = (t3_price > sl) if ev['direction'] == 'Long' else (t3_price < sl)
+        if t3_valid:
+            fresh = not _touched_since(df_closed, t3_ts, t3_price)
+            return t3_price, fresh, True
+    # TEST3 belum waktunya / tidak tersedia / tidak valid -> pakai TEST1
+    fresh = not _touched_since(df_closed, ev['ready_ts'], ev['entry_price'])
+    return ev['entry_price'], fresh, False
+
+
+def process_new_signals(coin, df_closed, now_ts=None):
     """Cek sinyal baru (TEST1+TEST2 lolos, ready_ts > last_seen[coin]) ->
     masukkan ke waiting_signals (BELUM ada order nyata di Bybit). Dedup:
     kalau sudah ada waiting/pending/posisi utk arah yang sama, skip (tiap
     level dipakai PERSIS SEKALI).
-    FRESHNESS CHECK: kalau entry_price levelnya SUDAH PERNAH tersentuh oleh
-    data historis (candle H1 setelah TEST2 confirm) SEBELUM sinyal ini
-    sempat diproses (mis. bot baru pertama kali deploy, atau abis mati
-    beberapa jam/hari) -> level dianggap GUGUR, TIDAK dimasukkan ke
-    waiting_signals. Ini yang mencegah bot "menghidupkan lagi" level basi
-    dari masa lalu yang seharusnya sudah tidak valid."""
+    FRESHNESS CHECK (sadar TEST3): kalau now_ts sudah lewat test3_ts saat
+    level ini PERTAMA KALI dilihat bot, TEST1 dianggap sudah kadaluarsa 1
+    candle -> freshness & entry langsung dicek terhadap TEST3 (bukan TEST1).
+    Kalau entry yg berlaku (TEST1 atau TEST3) SUDAH PERNAH tersentuh oleh
+    data historis SEBELUM sinyal ini sempat diproses (mis. bot baru pertama
+    kali deploy, atau abis mati beberapa jam/hari) -> level dianggap GUGUR,
+    TIDAK dimasukkan ke waiting_signals. Ini yang mencegah bot "menghidupkan
+    lagi" level basi dari masa lalu yang seharusnya sudah tidak valid."""
     events = detect_snr_events(df_closed)
     newest_seen = last_seen.get(coin, 0)
 
@@ -926,26 +949,34 @@ def process_new_signals(coin, df_closed):
                   f"menunggu/armed/posisi searah, skip.")
             continue
 
-        if not _level_still_fresh(df_closed, ev):
-            print(f"⏭️  {coin} [{direction}]: {ev['kind']} (TEST2 @ {ev['ready_ts']}) sudah "
-                  f"pernah TERSENTUH data historis sebelum sempat diproses -> GUGUR, dilewati.")
+        entry, is_fresh, used_t3 = _resolve_fresh_entry(df_closed, ev, now_ts)
+        level_label = 'Support level' if direction == 'Long' else 'Resistance level'
+        test_label = 'TEST3' if used_t3 else 'TEST1'
+        if not is_fresh:
+            log_entry(f"⏭️  {coin} [{direction}]: {ev['kind']} — wick {test_label} {entry:.6g} sudah "
+                      f"pernah TERSENTUH data historis sebelum sempat diproses -> GUGUR, dilewati.\n"
+                      f"    {level_label}   : {ev['level']:.6g}\n"
+                      f"    C1 terbentuk   : {_fmt_wib(ev['c1_ts'])}\n"
+                      f"    Test1 tersentuh: {_fmt_wib(ev['test1_ts'])}\n"
+                      f"    TEST2 (ready)  : {_fmt_wib(ev['ready_ts'])}"
+                      + (f"\n    TEST3          : {_fmt_wib(ev['test3_ts'])}" if used_t3 else ""))
             continue
 
         waiting_signals[key] = {
-            'coin': coin, 'direction': direction, 'entry': ev['entry_price'],
+            'coin': coin, 'direction': direction, 'entry': entry,
             'sl': ev['sl_price'], 'kind': ev['kind'], 'level': ev['level'],
-            'expire_ts': ev.get('expire_ts'),
+            'expire_ts': (ev['test3_ts'] + EXPIRE_CANDLES * 3600 * 1000) if used_t3 else ev.get('expire_ts'),
             'entry_price_t3': ev.get('entry_price_t3'), 'test3_ts': ev.get('test3_ts'),
-            'used_t3': False,
+            'used_t3': used_t3,
         }
-        level_label = 'Support level' if direction == 'Long' else 'Resistance level'
         log_entry(f"👀 {coin} [{direction}]: {ev['kind']} TEST1+TEST2 lolos (c1 @ {ev['c1_ts']}), "
                   f"MASIH FRESH (belum pernah tersentuh) — "
-                  f"menunggu harga masuk radius {APPROACH_PCT*100:.1f}% dari wick TEST1 "
-                  f"{ev['entry_price']:.6g}\n"
+                  f"menunggu harga masuk radius {APPROACH_PCT*100:.1f}% dari wick {test_label} "
+                  f"{entry:.6g}\n"
                   f"    {level_label}   : {ev['level']:.6g}\n"
                   f"    C1 terbentuk   : {_fmt_wib(ev['c1_ts'])}\n"
-                  f"    Test1 tersentuh: {_fmt_wib(ev['test1_ts'])}")
+                  f"    Test1 tersentuh: {_fmt_wib(ev['test1_ts'])}"
+                  + (f"\n    Entry langsung TEST3 (TEST1 sudah lewat 1 candle saat pertama terdeteksi)" if used_t3 else ""))
 
     last_seen[coin] = newest_seen
 
@@ -1179,7 +1210,7 @@ def run_bot():
                 manage_pending(coin)
                 process_armed_distance(coin, current_price, now_ts)
                 process_waiting_signals(coin, current_price, now_ts)
-                process_new_signals(coin, df_closed)
+                process_new_signals(coin, df_closed, now_ts)
 
             except Exception as e:
                 print(f"⚠️ Error {coin}: {e}")
