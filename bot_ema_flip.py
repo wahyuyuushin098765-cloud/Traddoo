@@ -967,7 +967,7 @@ def process_new_signals(coin, df_closed, now_ts=None):
             'sl': ev['sl_price'], 'kind': ev['kind'], 'level': ev['level'],
             'expire_ts': (ev['test3_ts'] + EXPIRE_CANDLES * 3600 * 1000) if used_t3 else ev.get('expire_ts'),
             'entry_price_t3': ev.get('entry_price_t3'), 'test3_ts': ev.get('test3_ts'),
-            'used_t3': used_t3,
+            'used_t3': used_t3, 'ready_ts': ev['ready_ts'],
         }
         log_entry(f"👀 {coin} [{direction}]: {ev['kind']} TEST1+TEST2 lolos (c1 @ {ev['c1_ts']}), "
                   f"MASIH FRESH (belum pernah tersentuh) — "
@@ -981,6 +981,31 @@ def process_new_signals(coin, df_closed, now_ts=None):
     last_seen[coin] = newest_seen
 
 
+def _lookup_test3_from_cache(coin, direction, ready_ts):
+    """Cari harga wick candle TEST3 (1 candle H1 SETELAH TEST2/ready_ts) dari
+    cache OHLC H1 terakhir (LAST_OHLC), dipakai saat entry_price_t3 belum
+    sempat dihitung di detect_snr_events (krn candle TEST3 belum closed
+    saat level pertama kali terdeteksi -> tersimpan None PERMANEN di
+    waiting_signals/pending kalau tidak di-refresh di sini). Return
+    (entry_price_t3, test3_ts) atau (None, None) kalau candle TEST3 belum
+    ada di cache (msh berjalan / belum ke-fetch lagi)."""
+    if ready_ts is None:
+        return None, None
+    df = LAST_OHLC.get((coin, '60'))
+    if df is None or len(df) == 0:
+        return None, None
+    test3_ts_target = ready_ts + 3600 * 1000
+    ts = df['ts'].values
+    idx = np.where(ts == test3_ts_target)[0]
+    if len(idx) == 0:
+        return None, None   # candle TEST3 msh berjalan / belum ke-fetch
+    i = int(idx[0])
+    if direction == 'Long':
+        return float(df['low'].values[i]), int(test3_ts_target)
+    else:
+        return float(df['high'].values[i]), int(test3_ts_target)
+
+
 def _maybe_switch_to_test3(coin, direction, sig, now_ts):
     """Cek & lakukan switch entry TEST1 -> TEST3 (disamakan dgn backtest):
     kalau ENABLE_TEST3 aktif, belum pernah di-switch, data TEST3 tersedia,
@@ -988,12 +1013,22 @@ def _maybe_switch_to_test3(coin, direction, sig, now_ts):
     entry dipindah ke wick TEST3 (Long->low, Short->high). Guard: kalau
     entry TEST3 ada di sisi SALAH dari SL (mis. Long tapi entry<=SL), TEST3
     dianggap tidak valid, tetap pakai TEST1. Return True kalau switch terjadi
-    (sig dimodifikasi in-place)."""
+    (sig dimodifikasi in-place).
+    entry_price_t3/test3_ts bisa None kalau candle TEST3 belum closed saat
+    level PERTAMA KALI terdeteksi -- kalau begitu, coba REFRESH dari cache
+    OHLC terbaru (_lookup_test3_from_cache) sebelum menyerah, supaya tidak
+    tersangkut None permanen walau candle TEST3 sebenarnya sudah closed."""
     if not ENABLE_TEST3 or sig.get('used_t3') or now_ts is None:
         return False
     t3_price = sig.get('entry_price_t3')
     t3_ts = sig.get('test3_ts')
-    if t3_price is None or t3_ts is None or now_ts < t3_ts:
+    if t3_price is None or t3_ts is None:
+        t3_price, t3_ts = _lookup_test3_from_cache(coin, direction, sig.get('ready_ts'))
+        if t3_price is None:
+            return False   # candle TEST3 msh blm tersedia sama sekali, coba lagi scan berikutnya
+        sig['entry_price_t3'] = t3_price
+        sig['test3_ts'] = t3_ts
+    if now_ts < t3_ts:
         return False
     sig['used_t3'] = True
     sl = sig['sl']
@@ -1053,7 +1088,7 @@ def process_waiting_signals(coin, current_price, now_ts=None):
                              'entry': entry_r, 'sl': sl_r, 'dist': dist_r, 'order_id': order_id,
                              'kind': sig['kind'], 'level': sig['level'], 'expire_ts': sig.get('expire_ts'),
                              'entry_price_t3': sig.get('entry_price_t3'), 'test3_ts': sig.get('test3_ts'),
-                             'used_t3': sig.get('used_t3', False)}
+                             'used_t3': sig.get('used_t3', False), 'ready_ts': sig.get('ready_ts')}
             del waiting_signals[key]
             log_entry(f"📌 {coin} [{direction}]: harga masuk radius {APPROACH_PCT*100:.1f}% — "
                       f"LIMIT {side.upper()} dipasang NYATA @ wick {entry_r:.6g} SL {sl_r:.6g}")
@@ -1081,7 +1116,7 @@ def process_armed_distance(coin, current_price, now_ts=None):
                                      'sl': st.get('sl'), 'kind': st.get('kind', ''),
                                      'level': st.get('level', st['entry']), 'expire_ts': st.get('expire_ts'),
                                      'entry_price_t3': st.get('entry_price_t3'), 'test3_ts': st.get('test3_ts'),
-                                     'used_t3': st.get('used_t3', False)}
+                                     'used_t3': st.get('used_t3', False), 'ready_ts': st.get('ready_ts')}
             del pending[key]
             log_entry(f"🔀 {coin} [{direction}]: order lama (wick TEST1) dibatalkan krn beralih ke TEST3, "
                       f"balik menunggu dari entry baru.")
@@ -1104,7 +1139,7 @@ def process_armed_distance(coin, current_price, now_ts=None):
                                  'sl': st.get('sl'), 'kind': st.get('kind', ''),
                                  'level': st.get('level', entry), 'expire_ts': st.get('expire_ts'),
                                  'entry_price_t3': st.get('entry_price_t3'), 'test3_ts': st.get('test3_ts'),
-                                 'used_t3': st.get('used_t3', False)}
+                                 'used_t3': st.get('used_t3', False), 'ready_ts': st.get('ready_ts')}
         del pending[key]
         log_entry(f"🔙 {coin} [{direction}]: harga menjauh lagi (> {APPROACH_PCT*100:.1f}%) sebelum fill — "
                   f"limit dibatalkan, balik menunggu.")
