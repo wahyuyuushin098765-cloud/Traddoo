@@ -525,8 +525,10 @@ def detect_snr_events(df):
     TEST2: candle TEPAT SETELAH TEST1, harus ENGULFING (Support: ujung body
            TEST2 > high candle TEST1. Resistance: ujung body TEST2 < low
            candle TEST1) DAN body candle TEST2 (|close-open|) harus lebih
-           BESAR (ukuran, wick tidak dihitung) daripada body candle TEST1.
-           Kalau salah satu gagal -> level gugur (dicoba sekali saja).
+           BESAR (ukuran, wick tidak dihitung) daripada body candle TEST1
+           DAN body candle TEST2 harus lebih BESAR daripada TOTAL WICK
+           candle TEST2 itu sendiri (candle TEST2 harus "solid", body
+           dominan). Kalau salah satu gagal -> level gugur (dicoba sekali saja).
     entry_price = ujung wick candle TEST1 (Long->high, Short->low).
     sl_price = ADAPTIF, di ujung wick candle TEST2 (Long->low, Short->high),
                dengan floor minimum SL_MIN_PCT dari entry (kalau wick TEST2
@@ -576,6 +578,16 @@ def detect_snr_events(df):
         body_size_t1 = abs(c[test1_i] - o[test1_i])
         body_size_t2 = abs(c[t2] - o[t2])
         if not (body_size_t2 > body_size_t1 + WICK_EPS):
+            continue
+
+        # Syarat tambahan lagi: body candle TEST2 harus lebih besar daripada
+        # TOTAL WICK candle TEST2 itu sendiri (wick atas + wick bawah) --
+        # memastikan candle TEST2 benar-benar candle "solid" (body dominan),
+        # bukan candle dengan body kecil tapi wick panjang di kedua sisi.
+        body_top_t2_own = max(o[t2], c[t2])
+        body_bottom_t2_own = min(o[t2], c[t2])
+        wick_total_t2 = (h[t2] - body_top_t2_own) + (body_bottom_t2_own - l[t2])
+        if not (body_size_t2 > wick_total_t2 + WICK_EPS):
             continue
 
         kind = 'SNR_SUPPORT' if ty == 'support' else 'SNR_RESISTANCE'
@@ -1186,6 +1198,7 @@ def run_bot():
           f"trail aktif 1:{TRAIL_ACT_R:.0f} | trail width {TRAIL_STOP:.1f}x | "
           f"risk {RISK_PCT*100:.0f}%/trade | lev {LEVERAGE}x | slot max {MAX_CONCURRENT} | "
           f"HEDGE {'ON' if ALLOW_HEDGE else 'off'} | SL adaptif wick TEST2, min {SL_MIN_PCT*100:.2f}% dari entry | "
+          f"body TEST2>body TEST1, body TEST2>wick TEST2 | "
           f"expire {EXPIRE_CANDLES} candle H1 | TEST3 {'AKTIF' if ENABLE_TEST3 else 'nonaktif'} | {len(SYMBOLS)} koin")
     if not test_connection():
         print("⛔ Tidak bisa konek ke Bybit.")
